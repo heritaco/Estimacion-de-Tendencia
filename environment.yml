@@ -1,0 +1,12 @@
+name: guerrero-gpu
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - tk
+  - numpy
+  - matplotlib
+  - ipykernel
+  - cuda-version=12.4
+  - cupy
+prefix: C:\Users\herie\miniconda3\envs\guerrero-gpu
