@@ -1,0 +1,489 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm, bm}
+
+\begin{document}
+
+\begin{center}
+  {\Large Derivation of the Validation MSE and its Derivative w.r.t. $\lambda$}\\[0.5em]
+\end{center}
+
+\begin{quote}
+\emph{``All models are wrong, but some are useful.''} --- G.\ E.\ P.\ Box
+\end{quote}
+
+\section{Problem setup and notation}
+
+Let
+\begin{itemize}
+  \item $N \in \mathbb{N}$ be the length of the time series.
+  \item $\bm{Z} \in \mathbb{R}^N$ be the observed data vector:
+    \[
+      \bm{Z} =
+      \begin{bmatrix}
+      Z_1\\
+      Z_2\\
+      \vdots\\
+      Z_N
+      \end{bmatrix}.
+    \]
+  \item $d \in \mathbb{N}$ be the order of differencing used in the penalty.
+  \item $K \in \mathbb{R}^{(N-d)\times N}$ be the differencing matrix of order $d$.
+  \item $\lambda > 0$ be the smoothing (penalty) parameter.
+\end{itemize}
+
+We consider the penalized least squares problem
+\begin{equation}
+\label{eq:PLS}
+\min_{\bm{t} \in \mathbb{R}^N}
+  J(\bm{t};\lambda)
+  := \big\|\bm{Z} - \bm{t}\big\|_2^2
+   + \lambda \big\|K \bm{t}\big\|_2^2.
+\end{equation}
+
+The goal is:
+\begin{itemize}
+  \item For each $\lambda > 0$, compute the trend estimator
+    \[
+    \widehat{\bm{t}}(\lambda) = \arg\min_{\bm{t}} J(\bm{t};\lambda).
+    \]
+  \item On a separate validation set, define the mean squared error as a function of $\lambda$,
+    \[
+    f(\lambda) := \mathrm{MSE}_{\text{val}}(\lambda),
+    \]
+    and derive an explicit expression for the derivative $\dfrac{d}{d\lambda} f(\lambda)$.
+\end{itemize}
+
+\section{Closed form of the penalized estimator}
+
+We solve \eqref{eq:PLS} explicitly.
+
+First note that
+\[
+\big\|\bm{Z} - \bm{t}\big\|_2^2
+= (\bm{Z}-\bm{t})^\top (\bm{Z}-\bm{t}),
+\qquad
+\big\|K \bm{t}\big\|_2^2
+= (K\bm{t})^\top (K\bm{t}).
+\]
+
+Thus
+\begin{align*}
+J(\bm{t};\lambda)
+&= (\bm{Z} - \bm{t})^\top (\bm{Z} - \bm{t})
+   + \lambda (K\bm{t})^\top (K\bm{t})\\[0.3em]
+&= (\bm{Z} - \bm{t})^\top (\bm{Z} - \bm{t})
+   + \lambda \bm{t}^\top K^\top K \bm{t}.
+\end{align*}
+
+Expand the first quadratic term:
+\begin{align*}
+(\bm{Z} - \bm{t})^\top (\bm{Z} - \bm{t})
+&= \bm{Z}^\top \bm{Z}
+   - 2 \bm{Z}^\top \bm{t}
+   + \bm{t}^\top \bm{t}.
+\end{align*}
+
+Hence
+\begin{align*}
+J(\bm{t};\lambda)
+&= \bm{Z}^\top \bm{Z}
+   - 2 \bm{Z}^\top \bm{t}
+   + \bm{t}^\top \bm{t}
+   + \lambda \bm{t}^\top K^\top K \bm{t}.
+\end{align*}
+
+Group the terms that depend on $\bm{t}$:
+\begin{align*}
+J(\bm{t};\lambda)
+&= \bm{Z}^\top \bm{Z}
+   + \left( \bm{t}^\top \bm{t}
+   + \lambda \bm{t}^\top K^\top K \bm{t} - 2 \bm{Z}^\top \bm{t} \right)\\[0.3em]
+&= \bm{Z}^\top \bm{Z}
+   + \left( \bm{t}^\top (I_N + \lambda K^\top K) \bm{t}
+   - 2 \bm{Z}^\top \bm{t} \right),
+\end{align*}
+where $I_N$ is the $N \times N$ identity matrix.
+
+Define the symmetric positive definite matrix
+\[
+A(\lambda) := I_N + \lambda K^\top K \in \mathbb{R}^{N\times N}.
+\]
+
+Then
+\begin{align*}
+J(\bm{t};\lambda)
+&= \bm{Z}^\top \bm{Z}
+   + \bm{t}^\top A(\lambda)\bm{t}
+   - 2 \bm{Z}^\top \bm{t}.
+\end{align*}
+
+To find the minimizer, compute the gradient of $J$ with respect to $\bm{t}$ and set it equal to $\bm{0}$:
+\[
+\nabla_{\bm{t}} J(\bm{t};\lambda) = \bm{0}.
+\]
+
+Recall:
+\begin{itemize}
+  \item If $A$ is symmetric, then $\nabla_{\bm{t}} (\bm{t}^\top A \bm{t}) = 2A\bm{t}$.
+  \item $\nabla_{\bm{t}} (\bm{Z}^\top \bm{t}) = \bm{Z}$.
+\end{itemize}
+
+Apply this:
+\begin{align*}
+\nabla_{\bm{t}} J(\bm{t};\lambda)
+&= \nabla_{\bm{t}} \left[
+    \bm{Z}^\top \bm{Z} + \bm{t}^\top A(\lambda)\bm{t}
+    - 2 \bm{Z}^\top \bm{t} \right]\\[0.3em]
+&= 0 + 2A(\lambda)\bm{t} - 2\bm{Z}.
+\end{align*}
+
+Set gradient equal to $\bm{0}$:
+\begin{align*}
+\nabla_{\bm{t}} J(\bm{t};\lambda) = \bm{0}
+&\iff 2A(\lambda)\bm{t} - 2\bm{Z} = \bm{0}\\[0.3em]
+&\iff 2A(\lambda)\bm{t} = 2\bm{Z}\\[0.3em]
+&\iff A(\lambda)\bm{t} = \bm{Z}.
+\end{align*}
+
+Thus the minimizer solves the linear system
+\[
+A(\lambda)\widehat{\bm{t}}(\lambda) = \bm{Z}.
+\]
+
+Since $A(\lambda)$ is symmetric positive definite, it is invertible, so
+\begin{equation}
+\label{eq:t_hat}
+\widehat{\bm{t}}(\lambda) = A(\lambda)^{-1} \bm{Z}.
+\end{equation}
+
+Define the \emph{smoothing matrix}
+\[
+S(\lambda) := A(\lambda)^{-1} = \big(I_N + \lambda K^\top K\big)^{-1}.
+\]
+
+Then
+\begin{equation}
+\label{eq:t_hat_S}
+\widehat{\bm{t}}(\lambda) = S(\lambda)\bm{Z}.
+\end{equation}
+
+\section{Validation set and validation MSE}
+
+Let $\mathcal{V} \subset \{1,2,\dots,N\}$ denote the index set of validation observations, and let
+\[
+n_{\text{val}} := |\mathcal{V}|
+\]
+be the number of validation points.
+
+Define the \emph{selection matrix} $R \in \mathbb{R}^{n_{\text{val}}\times N}$ such that
+\[
+\bm{Z}_{\text{val}} := R\bm{Z} \in \mathbb{R}^{n_{\text{val}}}
+\]
+is the vector of validation observations. Concretely, each row of $R$ is a standard basis vector selecting the corresponding index in $\mathcal{V}$.
+
+Similarly, the fitted trend on the validation points is
+\[
+\widehat{\bm{t}}_{\text{val}}(\lambda)
+:= R \widehat{\bm{t}}(\lambda)
+= R S(\lambda)\bm{Z}.
+\]
+
+Define the validation residual vector
+\begin{equation}
+\label{eq:r_def}
+\bm{r}(\lambda)
+:= \bm{Z}_{\text{val}} - \widehat{\bm{t}}_{\text{val}}(\lambda)
+= R\bm{Z} - R S(\lambda)\bm{Z}.
+\end{equation}
+
+The validation mean squared error (MSE) as a function of $\lambda$ is
+\begin{equation}
+\label{eq:MSE_val_def}
+f(\lambda)
+:= \mathrm{MSE}_{\text{val}}(\lambda)
+:= \frac{1}{n_{\text{val}}}
+   \big\|\bm{r}(\lambda)\big\|_2^2
+= \frac{1}{n_{\text{val}}}\,\bm{r}(\lambda)^\top \bm{r}(\lambda).
+\end{equation}
+
+Our objective is now:
+\[
+\text{derive } \frac{d}{d\lambda} f(\lambda).
+\]
+
+\section{Derivative of the smoothing matrix $S(\lambda)$}
+
+Recall
+\[
+S(\lambda) = A(\lambda)^{-1},
+\qquad
+A(\lambda) = I_N + \lambda K^\top K.
+\]
+
+First compute the derivative of $A(\lambda)$:
+
+\[
+\frac{d}{d\lambda} A(\lambda)
+= \frac{d}{d\lambda} \big( I_N + \lambda K^\top K\big)
+= \bm{0} + 1\cdot K^\top K
+= K^\top K.
+\]
+
+Now use the well-known formula for the derivative of an inverse:
+\[
+\frac{d}{d\lambda} A(\lambda)^{-1}
+= -A(\lambda)^{-1}
+   \left(\frac{d}{d\lambda} A(\lambda)\right)
+   A(\lambda)^{-1}.
+\]
+
+Apply this with $A(\lambda)$ above:
+\begin{align*}
+\frac{d}{d\lambda} S(\lambda)
+&= \frac{d}{d\lambda} A(\lambda)^{-1}\\[0.3em]
+&= -A(\lambda)^{-1} \big(K^\top K\big) A(\lambda)^{-1}\\[0.3em]
+&= -S(\lambda) K^\top K S(\lambda).
+\end{align*}
+
+Thus
+\begin{equation}
+\label{eq:S_prime}
+S'(\lambda)
+:= \frac{d}{d\lambda} S(\lambda)
+= -S(\lambda) K^\top K S(\lambda).
+\end{equation}
+
+\section{Derivative of the validation residual $\bm{r}(\lambda)$}
+
+From \eqref{eq:r_def}, we have
+\[
+\bm{r}(\lambda)
+= R\bm{Z} - R S(\lambda) \bm{Z}.
+\]
+
+Differentiate with respect to $\lambda$:
+
+\begin{align*}
+\frac{d}{d\lambda} \bm{r}(\lambda)
+&= \frac{d}{d\lambda} \big( R\bm{Z} - R S(\lambda)\bm{Z} \big)\\[0.3em]
+&= \frac{d}{d\lambda} (R\bm{Z})
+  - \frac{d}{d\lambda} (R S(\lambda)\bm{Z}).
+\end{align*}
+
+Note:
+\begin{itemize}
+  \item $R$ does not depend on $\lambda$.
+  \item $\bm{Z}$ does not depend on $\lambda$.
+\end{itemize}
+Therefore
+\[
+\frac{d}{d\lambda} (R\bm{Z}) = R \cdot \bm{0} = \bm{0}.
+\]
+
+For the second term, treat $R$ as constant and apply the chain rule:
+\[
+\frac{d}{d\lambda} \big(R S(\lambda)\bm{Z}\big)
+= R \frac{d}{d\lambda} \big(S(\lambda)\bm{Z}\big).
+\]
+
+Since $\bm{Z}$ is constant, we differentiate $S(\lambda)$:
+\[
+\frac{d}{d\lambda} \big(S(\lambda)\bm{Z}\big)
+= S'(\lambda)\bm{Z}.
+\]
+
+Thus
+\[
+\frac{d}{d\lambda} \big(R S(\lambda)\bm{Z}\big)
+= R S'(\lambda)\bm{Z}.
+\]
+
+Combining both pieces:
+\begin{align*}
+\frac{d}{d\lambda} \bm{r}(\lambda)
+&= \bm{0} - R S'(\lambda)\bm{Z}\\[0.3em]
+&= -R S'(\lambda)\bm{Z}.
+\end{align*}
+
+Now substitute $S'(\lambda)$ from \eqref{eq:S_prime}:
+\[
+S'(\lambda) = -S(\lambda) K^\top K S(\lambda).
+\]
+
+Therefore
+\begin{align*}
+\frac{d}{d\lambda} \bm{r}(\lambda)
+&= -R\left( -S(\lambda) K^\top K S(\lambda)\right)\bm{Z}\\[0.3em]
+&= R S(\lambda) K^\top K S(\lambda)\bm{Z}.
+\end{align*}
+
+So we have
+\begin{equation}
+\label{eq:r_prime}
+\bm{r}'(\lambda)
+:= \frac{d}{d\lambda} \bm{r}(\lambda)
+= R S(\lambda) K^\top K S(\lambda)\bm{Z}.
+\end{equation}
+
+\section{Derivative of the validation MSE $f(\lambda)$}
+
+Recall the definition from \eqref{eq:MSE_val_def}:
+\[
+f(\lambda)
+= \frac{1}{n_{\text{val}}} \bm{r}(\lambda)^\top \bm{r}(\lambda).
+\]
+
+Let us write explicitly:
+\begin{equation}
+\label{eq:f_lambda}
+f(\lambda)
+= \frac{1}{n_{\text{val}}}
+\sum_{i=1}^{n_{\text{val}}}
+r_i(\lambda)^2,
+\end{equation}
+where $r_i(\lambda)$ is the $i$-th component of the vector $\bm{r}(\lambda)$.
+
+\subsection{Step-by-step scalar derivative}
+
+Differentiate \eqref{eq:f_lambda} term by term:
+\begin{align*}
+\frac{d}{d\lambda} f(\lambda)
+&= \frac{d}{d\lambda}
+   \left(
+     \frac{1}{n_{\text{val}}}
+     \sum_{i=1}^{n_{\text{val}}} r_i(\lambda)^2
+   \right)\\[0.3em]
+&= \frac{1}{n_{\text{val}}}
+   \sum_{i=1}^{n_{\text{val}}}
+   \frac{d}{d\lambda} \big( r_i(\lambda)^2 \big).
+\end{align*}
+
+For each $i$, apply the chain rule:
+\[
+\frac{d}{d\lambda} \big( r_i(\lambda)^2 \big)
+= 2 r_i(\lambda) \cdot r_i'(\lambda).
+\]
+
+Thus
+\begin{align*}
+\frac{d}{d\lambda} f(\lambda)
+&= \frac{1}{n_{\text{val}}}
+   \sum_{i=1}^{n_{\text{val}}}
+   2 r_i(\lambda) r_i'(\lambda)\\[0.3em]
+&= \frac{2}{n_{\text{val}}}
+   \sum_{i=1}^{n_{\text{val}}}
+   r_i(\lambda) r_i'(\lambda).
+\end{align*}
+
+Now rewrite the sum as an inner product of vectors:
+\[
+\sum_{i=1}^{n_{\text{val}}}
+   r_i(\lambda) r_i'(\lambda)
+= \bm{r}(\lambda)^\top \bm{r}'(\lambda).
+\]
+
+Therefore
+\begin{equation}
+\label{eq:f_prime_inner_product}
+f'(\lambda)
+:= \frac{d}{d\lambda} f(\lambda)
+= \frac{2}{n_{\text{val}}}\,
+  \bm{r}(\lambda)^\top \bm{r}'(\lambda).
+\end{equation}
+
+\subsection{Substituting $\bm{r}(\lambda)$ and $\bm{r}'(\lambda)$}
+
+From \eqref{eq:r_def}:
+\[
+\bm{r}(\lambda) = R\bm{Z} - R S(\lambda)\bm{Z}
+= R \big(I_N - S(\lambda)\big)\bm{Z}.
+\]
+
+From \eqref{eq:r_prime}:
+\[
+\bm{r}'(\lambda)
+= R S(\lambda) K^\top K S(\lambda)\bm{Z}.
+\]
+
+Substitute these into \eqref{eq:f_prime_inner_product}:
+
+\begin{align*}
+f'(\lambda)
+&= \frac{2}{n_{\text{val}}}
+\Big( R \big(I_N - S(\lambda)\big)\bm{Z} \Big)^\top
+\Big( R S(\lambda) K^\top K S(\lambda)\bm{Z} \Big).
+\end{align*}
+
+Note that we cannot simplify much further in general, because $R$ may not be square or symmetric. This is already a compact expression.
+
+Hence the final expression for the derivative is
+\begin{equation}
+\label{eq:final_f_prime}
+f'(\lambda)
+= \frac{2}{n_{\text{val}}}
+\left[ R \big(I_N - S(\lambda)\big)\bm{Z} \right]^\top
+\left[ R S(\lambda) K^\top K S(\lambda)\bm{Z} \right].
+\end{equation}
+
+\section{Special case: validation on all points}
+
+If the validation set is the entire sample, then $R = I_N$ and $n_{\text{val}} = N$.
+
+In this case,
+\[
+\bm{r}(\lambda)
+= (I_N - S(\lambda))\bm{Z},
+\]
+and
+\[
+\bm{r}'(\lambda)
+= S(\lambda) K^\top K S(\lambda)\bm{Z}.
+\]
+
+Thus
+\begin{align*}
+f(\lambda)
+&= \frac{1}{N} \big\| (I_N - S(\lambda))\bm{Z}\big\|_2^2,\\[0.3em]
+f'(\lambda)
+&= \frac{2}{N}\,
+\big[(I_N - S(\lambda))\bm{Z}\big]^\top
+\big[ S(\lambda) K^\top K S(\lambda)\bm{Z}\big].
+\end{align*}
+
+\section{On solving $f'(\lambda)=0$}
+
+To find the optimal $\lambda^\star$ that minimizes the validation MSE, one would like to solve
+\[
+f'(\lambda^\star) = 0.
+\]
+
+However, even if we diagonalize
+\[
+K^\top K = U \Lambda U^\top,
+\quad
+\Lambda = \mathrm{diag}(\delta_1, \dots, \delta_N),
+\]
+and write $S(\lambda) = (I + \lambda K^\top K)^{-1} = U (I + \lambda \Lambda)^{-1} U^\top$, the expression for $f(\lambda)$ becomes a sum of rational functions in $\lambda$ of the form
+\[
+\frac{(\text{polynomial in } \lambda)}{\prod_j (1+\lambda\delta_j)^2},
+\]
+and $f'(\lambda) = 0$ turns into a high-degree rational equation in $\lambda$ with no general closed-form solution.
+
+For this reason, in practice $\lambda^\star$ is found by one-dimensional numerical optimization (e.g., golden-section search, Brent's method, or Newton's method using $f'(\lambda)$ from \eqref{eq:final_f_prime}).
+
+\bigskip
+
+\noindent
+\[
+\boxed{
+\frac{d}{d\lambda}\,\mathrm{MSE}_{\mathrm{val}}(\lambda)
+=
+\frac{2}{n_{\mathrm{val}}}
+\left[ R (I_N - S(\lambda))\bm{Z} \right]^\top
+\left[ R S(\lambda) K^\top K S(\lambda)\bm{Z} \right],
+\quad
+S(\lambda) = (I_N + \lambda K^\top K)^{-1}.
+}
+\]
+
+\end{document}
