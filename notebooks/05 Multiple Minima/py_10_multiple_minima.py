@@ -691,7 +691,7 @@ def build_polynomial_from_train_tail(
 def main():
     # 1. Load S&P 500
     t_all, Z_all, meta = load_sp500_series(
-        ticker="NVDA",
+        ticker="^GSPC",
         start="2010-01-01",
         end=None,
         use_log=True,
