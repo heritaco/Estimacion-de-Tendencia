@@ -1016,7 +1016,213 @@ def run_weighted_training_comparison_single_transform(
 
     return results_by_mode, models_by_mode, df
 
+def compute_residuals_all_splits_transform_and_price(
+    df: pd.DataFrame,
+    model: Pipeline,
+    transform_name: str,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    For a fitted model and given transform, compute residuals in both spaces
+    for each split: train, val, test, and train+val.
 
+    Returns
+    -------
+    residuals_by_split : dict
+        Keys: 'train', 'val', 'test', 'train_val'.
+        Each value is a dict with:
+            'dates'    : DatetimeIndex
+            'y'        : transformed target
+            'y_hat'    : fitted transformed target
+            'resid_y'  : y - y_hat
+            'price'    : original Close
+            'price_hat': fitted Close (destransformed)
+            'resid_p'  : price - price_hat
+    """
+    # --- 1) Transform-space data ---
+    X_all, y_all, dates = make_transformed_time_regression_data(
+        df, transform_name=transform_name, price_col="close"
+    )
+    y_hat_all = model.predict(X_all)
+    n = len(y_all)
+    if n == 0:
+        raise ValueError(
+            f"No finite points for transform '{transform_name}' "
+            f"when computing residuals for all splits."
+        )
+
+    # --- 2) Price-space series & destransformation ---
+    prices_all = df["close"].to_numpy(dtype=float).ravel()
+    prices = df.loc[dates, "close"].to_numpy(dtype=float).ravel()
+
+    # Build full price_hat_all, copying the same inverse logic as elsewhere
+    if transform_name == "close":
+        price_hat_all = y_hat_all
+
+    elif transform_name == "log_close":
+        price_hat_all = np.exp(y_hat_all)
+
+    elif transform_name == "sqrt_close":
+        price_hat_all = np.clip(y_hat_all, a_min=0.0, a_max=None) ** 2
+
+    elif transform_name == "zscore_log_close":
+        logp_all = np.log(prices_all)
+        mu = float(np.mean(logp_all))
+        sigma = float(np.std(logp_all))
+        if sigma == 0.0:
+            sigma = 1.0
+        log_price_hat = y_hat_all * sigma + mu
+        price_hat_all = np.exp(log_price_hat)
+
+    elif transform_name == "diff_close":
+        price_hat_all = np.empty_like(y_hat_all)
+        price_hat_all[0] = prices[0]
+        for t in range(1, n):
+            price_hat_all[t] = price_hat_all[t - 1] + y_hat_all[t]
+
+    elif transform_name == "simple_return":
+        price_hat_all = np.empty_like(y_hat_all)
+        price_hat_all[0] = prices[0]
+        for t in range(1, n):
+            price_hat_all[t] = price_hat_all[t - 1] * (1.0 + y_hat_all[t])
+
+    elif transform_name == "log_return":
+        log_price_hat = np.empty_like(y_hat_all)
+        price_hat_all = np.empty_like(y_hat_all)
+        log_price_hat[0] = np.log(prices[0])
+        price_hat_all[0] = prices[0]
+        for t in range(1, n):
+            log_price_hat[t] = log_price_hat[t - 1] + y_hat_all[t]
+            price_hat_all[t] = np.exp(log_price_hat[t])
+
+    else:
+        raise ValueError(
+            f"No price-space inverse mapping implemented for transform "
+            f"'{transform_name}'."
+        )
+
+    # --- 3) Build slices for splits ---
+    idx_train, idx_val, idx_test, n_train, n_val, n_test = _segment_indices(
+        n, train_frac=train_frac, val_frac=val_frac
+    )
+
+    slices = {
+        "train": idx_train,
+        "val": idx_val,
+        "test": idx_test,
+        "train_val": slice(0, n_train + n_val),
+    }
+
+    residuals_by_split: Dict[str, Dict[str, np.ndarray]] = {}
+
+    for split_name, sl in slices.items():
+        y_split = y_all[sl]
+        y_hat_split = y_hat_all[sl]
+        p_split = prices[sl]
+        p_hat_split = price_hat_all[sl]
+        dates_split = dates[sl]
+
+        residuals_by_split[split_name] = {
+            "dates": dates_split,
+            "y": y_split,
+            "y_hat": y_hat_split,
+            "resid_y": y_split - y_hat_split,
+            "price": p_split,
+            "price_hat": p_hat_split,
+            "resid_p": p_split - p_hat_split,
+        }
+
+    return residuals_by_split
+
+def print_normality_tests_all_splits(
+    df: pd.DataFrame,
+    model: Pipeline,
+    transform_name: str,
+    space: str = "transform",
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compute and PRINT normality diagnostics for residuals on:
+
+        - train
+        - val
+        - test
+        - train_val (train + val)
+
+    Parameters
+    ----------
+    space : {'transform', 'price'}
+        'transform' => residuals in transformed target y_t.
+        'price'     => residuals in original Close (destransformed).
+
+    Returns
+    -------
+    stats_by_split : dict
+        stats_by_split[split_name] is a dict with:
+            - all keys from compute_normality_stats(...)
+            - 't_stat_mean0', 't_pvalue_mean0' for H0: mean(resid) = 0.
+    """
+    space = space.lower()
+    if space not in {"transform", "price"}:
+        raise ValueError("space must be 'transform' or 'price'.")
+
+    residuals_by_split = compute_residuals_all_splits_transform_and_price(
+        df=df,
+        model=model,
+        transform_name=transform_name,
+        train_frac=train_frac,
+        val_frac=val_frac,
+    )
+
+    stats_by_split: Dict[str, Dict[str, float]] = {}
+
+    print(
+        f"\n=== Normality tests for residuals in {space}-space "
+        f"(transform='{transform_name}') ==="
+    )
+
+    for split_name in ["train", "val", "test", "train_val"]:
+        res_split = residuals_by_split[split_name]
+        resid = (
+            res_split["resid_y"]
+            if space == "transform"
+            else res_split["resid_p"]
+        )
+
+        norm_stats = compute_normality_stats(resid)
+        n = norm_stats["n"]
+        mean = norm_stats["mean"]
+        std = norm_stats["std"]
+        jb = norm_stats["jb_stat"]
+        jb_p = norm_stats["jb_pvalue"]
+
+        # t-test for H0: mean(resid) = 0
+        if std > 0.0 and n > 1:
+            t_stat = mean / (std / np.sqrt(n))
+            p_t = 2 * stats.t.sf(np.abs(t_stat), df=n - 1)
+        else:
+            t_stat = float("nan")
+            p_t = float("nan")
+
+        # store and print
+        full_stats = dict(norm_stats)
+        full_stats["t_stat_mean0"] = t_stat
+        full_stats["t_pvalue_mean0"] = p_t
+        stats_by_split[split_name] = full_stats
+
+        print(
+            f"[{split_name:9s}] "
+            f"n={n:4d}, "
+            f"mean={mean:.3e}, std={std:.3e}, "
+            f"t={t_stat:.3f}, p_t={p_t:.3f}, "
+            f"JB={jb:.3f}, p_JB={jb_p:.3f}, "
+            f"skew={norm_stats['skew']:.3f}, "
+            f"kurt_excess={norm_stats['kurt_excess']:.3f}"
+        )
+
+    return stats_by_split
 
 # === PATCH 3: plotting + normality diagnostics for VALIDATION residuals ====
 # Put this in py103.py (e.g. near plotting utilities).
@@ -1025,7 +1231,7 @@ def plot_validation_residual_diagnostics(
     df: pd.DataFrame,
     model: Pipeline,
     transform_name: str,
-    space: str = "price",
+    space: str = "transform",
     train_frac: float = 0.6,
     val_frac: float = 0.2,
 ) -> None:

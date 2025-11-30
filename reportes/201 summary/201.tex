@@ -1,0 +1,477 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------------------------------------------------------
+% Paquetes básicos
+% ---------------------------------------------------------
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+\usepackage{amsmath, amssymb, amsfonts, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+% ---------------------------------------------------------
+% Entornos teoréticos (si ya los tienes, puedes omitir esto)
+% ---------------------------------------------------------
+\newtheorem{definition}{Definición}[section]
+\newtheorem{lemma}{Lema}[section]
+\newtheorem{proposition}{Proposición}[section]
+\newtheorem{remark}{Comentario}[section]
+
+% ---------------------------------------------------------
+% Comandos útiles
+% ---------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathbb{V}\mathrm{ar}}
+\newcommand{\1}{\mathbf{1}}
+
+\begin{document}
+
+\title{Suavizamiento Exponencial Triple de Holt--Winters\\
+con Selección de Parámetros por Validación sin Fuga de Información}
+\author{(Borrador técnico)}
+\date{}
+\maketitle
+
+\section{Planteamiento del problema y notación}
+
+Sea
+\[
+\{P_t\}_{t=1}^N
+\]
+una serie de precios diarios ajustados de un activo financiero (acción, índice, tipo de cambio, cripto, etc.). Definimos la serie de \emph{log--precios}
+\[
+Z_t = \log P_t,\qquad t = 1,\dots,N.
+\]
+
+\subsection*{Por qué usar log--precios}
+
+Trabajar con $Z_t = \log P_t$ en lugar de $P_t$ tiene varias ventajas:
+
+\begin{itemize}
+  \item Los rendimientos simples se aproximan por diferencias de log:
+  \[
+    r_t = \frac{P_t - P_{t-1}}{P_{t-1}}
+    \approx \log P_t - \log P_{t-1} = Z_t - Z_{t-1}.
+  \]
+  \item Transformaciones multiplicativas en precios se vuelven aditivas en log--precios, lo cual es coherente con el modelo aditivo de Holt--Winters.
+  \item Frecuentemente los errores en $Z_t$ son más cercanos a normales y de varianza aproximadamente constante que los errores en $P_t$.
+\end{itemize}
+
+\subsection*{Partición en entrenamiento, validación y prueba}
+
+Sea $N$ el número total de observaciones. Fijamos proporciones
+\[
+0 < f_{\text{train}}, f_{\text{val}} < 1,\qquad 
+f_{\text{train}} + f_{\text{val}} < 1,
+\]
+y definimos los tamaños enteros
+\[
+N_{\text{train}} = \lfloor f_{\text{train}} N \rfloor,\qquad
+N_{\text{val}}   = \lfloor f_{\text{val}} N \rfloor,\qquad
+N_{\text{test}}  = N - N_{\text{train}} - N_{\text{val}}.
+\]
+
+Partimos así la serie
+\[
+Z_1,\dots,Z_N
+\]
+en tres segmentos consecutivos:
+\begin{align*}
+  \text{Entrenamiento: } & Z_1,\dots,Z_{N_{\text{train}}},\\
+  \text{Validación: }    & Z_{N_{\text{train}}+1},\dots,Z_{N_{\text{train}}+N_{\text{val}}},\\
+  \text{Prueba: }        & Z_{N_{\text{train}}+N_{\text{val}}+1},\dots,Z_N.
+\end{align*}
+
+\begin{definition}[Sin fuga de información]
+Diremos que un procedimiento de ajuste y selección de hiperparámetros no tiene \emph{fuga de información} si:
+\begin{enumerate}
+  \item Los parámetros del modelo (en este caso los estados de Holt--Winters: nivel, tendencia y estacionalidad) se actualizan exclusivamente con el segmento de entrenamiento.
+  \item El segmento de validación se usa únicamente para evaluar pronósticos verdaderamente fuera de muestra.
+  \item El segmento de prueba se mantiene completamente fuera de la selección de hiperparámetros y sólo se utiliza para una evaluación final.
+\end{enumerate}
+\end{definition}
+
+Nuestro objetivo es ajustar un modelo de suavizamiento exponencial triple (Holt--Winters aditivo) sobre $\{Z_t\}$, elegir:
+\[
+s = \alpha \in (0,1),\quad m \in \{m_1,\dots,m_K\}
+\]
+mediante el error cuadrático medio (MSE) en validación, y producir pronósticos para la parte de validación y prueba, todo sin fuga de información.
+
+\section{Modelo Holt--Winters aditivo (triple suavizamiento exponencial)}
+
+\subsection{Descomposición aditiva}
+
+El modelo Holt--Winters aditivo postula que el log--precio $Z_t$ puede escribirse como:
+\[
+Z_t = \ell_t + b_t + s_{p_t} + \varepsilon_t,\qquad t=1,\dots,N,
+\]
+donde:
+
+\begin{itemize}
+  \item $\ell_t$ es el \textbf{nivel} (tendencia lenta) en el tiempo $t$.
+  \item $b_t$ es el \textbf{componente de crecimiento} o \emph{trend} local (pendiente).
+  \item $s_{p_t}$ es el \textbf{componente estacional aditivo} en la posición $p_t$ dentro del ciclo estacional.
+  \item $\varepsilon_t$ es un término de error (ruido) con media cero.
+  \item $p_t$ es el índice estacional:
+  \[
+    p_t = t \bmod m \in \{0,1,\dots,m-1\},
+  \]
+  donde $m$ es la longitud del periodo estacional (por ejemplo, $m=5$ para “patrón semanal” en días hábiles).
+\end{itemize}
+
+Interpretación: en cada instante $t$, la serie es la suma de un nivel global, una tendencia lineal local y una corrección estacional que depende únicamente de la posición dentro del ciclo de longitud $m$.
+
+\subsection{Parámetros de suavizamiento}
+
+En una versión simplificada usamos un sólo hiperparámetro de suavizamiento $\alpha \in (0,1)$ y lo reutilizamos para:
+\begin{itemize}
+  \item Actualización del nivel,
+  \item Actualización del componente de tendencia,
+  \item Actualización del componente estacional.
+\end{itemize}
+
+Esto implica fijar
+\[
+\beta = \alpha,\qquad \gamma = \alpha,
+\]
+aunque en versiones más generales se podría tratar a $\beta$ y $\gamma$ como parámetros independientes.
+
+\section{Inicialización de nivel, tendencia y estacionalidad}
+
+Sea $m$ un candidato a longitud estacional. Suponemos que el conjunto de entrenamiento tiene al menos $2m$ observaciones:
+\[
+N_{\text{train}} \ge 2m,
+\]
+de modo que existe al menos dos ciclos completos dentro del entrenamiento.
+
+\begin{definition}[Inicialización con promedios estacionales]
+Sea
+\[
+Z_1,\dots,Z_{N_{\text{train}}}
+\]
+la serie de entrenamiento y $m$ la longitud estacional. Definimos:
+\begin{itemize}
+  \item $n_{\text{seas}} = \left\lfloor N_{\text{train}} / m \right\rfloor$ número de estaciones completas;
+  \item elegimos un número $n_{\text{use}}$ de estaciones a usar para inicialización, típicamente
+  \[
+    n_{\text{use}} = \max\{2, \min(n_{\text{seas}}, 8)\};
+  \]
+  \item Para cada estación $k = 0,\dots,n_{\text{use}}-1$ tomamos el bloque
+  \[
+    \{ Z_{km+1},\dots,Z_{km+m} \}
+  \]
+  y definimos el promedio de la $k$--ésima estación
+  \[
+    \bar Z^{(k)} = \frac{1}{m} \sum_{j=1}^{m} Z_{km + j}.
+  \]
+\end{itemize}
+\end{definition}
+
+A partir de esto definimos:
+
+\begin{itemize}
+  \item \textbf{Nivel inicial}:
+  \[
+    \ell_0 = \frac{1}{n_{\text{use}}} \sum_{k=0}^{n_{\text{use}}-1} \bar Z^{(k)}.
+  \]
+  Es el promedio de las estaciones iniciales.
+
+  \item \textbf{Tendencia inicial} (crecimiento promedio por unidad de tiempo):
+  \[
+    b_0 = \frac{\bar Z^{(1)} - \bar Z^{(0)}}{m},
+  \]
+  es decir, la diferencia entre las medias de las primeras dos estaciones, dividida por $m$ (número de pasos entre ellas). Si sólo hay una estación útil, podemos tomar $b_0 = 0$ como aproximación.
+
+  \item \textbf{Índices estacionales iniciales} aditivos:
+  para cada posición $j = 0,\dots,m-1$ dentro del ciclo, tomamos
+  \[
+    s_j = \frac{1}{n_{\text{use}}} \sum_{k=0}^{n_{\text{use}}-1} \left( Z_{km + (j+1)} - \bar Z^{(k)} \right).
+  \]
+  Es decir, la desviación promedio de la observación en la posición $j$ con respecto a la media de su estación.
+\end{itemize}
+
+Así obtenemos el vector inicial estacional
+\[
+\bm{s}^{(0)} = (s_0,\dots,s_{m-1}).
+\]
+
+\section{Actualización recursiva en el conjunto de entrenamiento}
+
+Trabajamos ahora únicamente con las observaciones de entrenamiento
+\[
+Z_1,\dots,Z_{N_{\text{train}}},
+\]
+y mantenemos la \emph{restricción clave}: las observaciones de validación y prueba no se usan para actualizar los estados.
+
+\subsection{Índice estacional}
+
+Para cada tiempo $t\ge1$ definimos
+\[
+p_t = (t-1) \bmod m \in \{0,\dots,m-1\},
+\]
+de forma que la observación $Z_t$ corresponde a la posición $p_t$ dentro del ciclo estacional.
+
+\subsection{Ecuaciones de Holt--Winters aditivo}
+
+Con parámetros $\alpha \in (0,1)$, $\beta = \alpha$, $\gamma = \alpha$, el algoritmo de actualización es:
+
+\begin{align}
+  \text{Nivel:}\quad
+  \ell_t
+    &= \alpha\,(Z_t - s_{p_t}) + (1-\alpha)(\ell_{t-1} + b_{t-1}),
+    \label{eq:level}\\[0.5em]
+  \text{Tendencia:}\quad
+  b_t
+    &= \beta\,(\ell_t - \ell_{t-1}) + (1-\beta)\,b_{t-1},
+    \label{eq:trend}\\[0.5em]
+  \text{Estacionalidad:}\quad
+  s_{p_t}
+    &= \gamma\,(Z_t - \ell_t) + (1-\gamma)\,s_{p_t}.
+    \label{eq:season}
+\end{align}
+
+\noindent Interpretación paso a paso:
+
+\begin{itemize}
+  \item En \eqref{eq:level}, la nueva estimación del nivel $\ell_t$ es una combinación convexa de:
+    \begin{itemize}
+      \item la observación \emph{deseasonalizada} $Z_t - s_{p_t}$;
+      \item el nivel previo proyectado un paso adelante $\ell_{t-1}+b_{t-1}$.
+    \end{itemize}
+
+  \item En \eqref{eq:trend}, la nueva tendencia $b_t$ se actualiza como combinación convexa de:
+    \begin{itemize}
+      \item el \emph{incremento} observado del nivel $\ell_t - \ell_{t-1}$;
+      \item la tendencia previa $b_{t-1}$.
+    \end{itemize}
+
+  \item En \eqref{eq:season}, el índice estacional en la posición $p_t$ se actualiza con:
+    \begin{itemize}
+      \item la desviación $Z_t - \ell_t$ entre la observación y el nivel,
+      \item el valor estacional previo en esa misma posición.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Valores ajustados en entrenamiento}
+
+Definimos el \emph{pronóstico un paso adelante} (ajuste in--sample) en el tiempo $t$ como
+\[
+\hat Z_t = \ell_{t-1} + b_{t-1} + s_{p_t},\qquad t\ge2.
+\]
+Para $t=1$ no hay historia anterior, así que se puede tomar
+\[
+\hat Z_1 = Z_1
+\]
+por conveniencia. De este modo se obtiene una serie ajustada
+\[
+\hat Z_1,\dots,\hat Z_{N_{\text{train}}}
+\]
+que suaviza la serie original de entrenamiento.
+
+\section{Pronóstico fuera de muestra: validación y prueba}
+
+Sea $T_{\text{train}} = N_{\text{train}}$ el último índice de entrenamiento. Después de procesar $Z_1,\dots,Z_{N_{\text{train}}}$ mediante \eqref{eq:level}--\eqref{eq:season}, tenemos:
+
+\[
+\ell_{T_{\text{train}}},\quad b_{T_{\text{train}}},\quad s_0,\dots,s_{m-1},\quad p_{T_{\text{train}}} = (T_{\text{train}}-1) \bmod m.
+\]
+
+Para un horizonte de pronóstico $h = 1,2,\dots$, el modelo Holt--Winters aditivo propone el pronóstico de $Z_{T_{\text{train}}+h}$ como
+\begin{equation}
+  \hat Z_{T_{\text{train}}+h \mid \text{train}}
+  = \ell_{T_{\text{train}}} + h\,b_{T_{\text{train}}}
+    + s_{p_{T_{\text{train}}+h}},
+  \qquad p_{T_{\text{train}}+h} := (p_{T_{\text{train}}} + h) \bmod m.
+  \label{eq:forecast-hw}
+\end{equation}
+
+\begin{definition}[Pronósticos de validación y prueba]
+Para cada $k=1,\dots,N_{\text{val}}$ (validación) y $h = k$, se define
+\[
+\hat Z_{N_{\text{train}}+k \mid \text{train}}
+ = \ell_{N_{\text{train}}} + k\,b_{N_{\text{train}}}
+   + s_{p_{N_{\text{train}}+k}},
+\]
+y para el segmento de prueba, con $k' = 1,\dots,N_{\text{test}}$ (horizontes continuando desde el final de validación),
+\[
+\hat Z_{N_{\text{train}} + N_{\text{val}} + k' \mid \text{train}}
+ = \ell_{N_{\text{train}}} + (N_{\text{val}}+k')\,b_{N_{\text{train}}}
+   + s_{p_{N_{\text{train}} + N_{\text{val}} + k'}}.
+\]
+En todos los casos, ningún dato de validación ni de prueba modifica los estados del modelo.
+\end{definition}
+
+\section{Función objetivo en validación y búsqueda en rejilla}
+
+\subsection{Función de pérdida en validación para $(\alpha,m)$}
+
+Fijemos un candidato de suavización $s=\alpha\in(0,1)$ y un candidato de periodo estacional $m\in\mathbb{N}$. Procedemos así:
+
+\begin{enumerate}
+  \item Inicializar $(\ell_0,b_0,\bm{s}^{(0)})$ usando únicamente $Z_1,\dots,Z_{N_{\text{train}}}$ y $m$.
+  \item Aplicar las actualizaciones \eqref{eq:level}--\eqref{eq:season} de $t=1$ a $t=N_{\text{train}}$.
+  \item Obtener $(\ell_{N_{\text{train}}}, b_{N_{\text{train}}}, \bm{s})$.
+  \item Generar los pronósticos de validación $\hat Z_{N_{\text{train}}+k\mid\text{train}}$ para $k=1,\dots,N_{\text{val}}$ usando \eqref{eq:forecast-hw}.
+\end{enumerate}
+
+Definimos los errores de validación para $(\alpha,m)$ como
+\[
+e_k(\alpha,m)
+  := Z_{N_{\text{train}}+k}
+   - \hat Z_{N_{\text{train}}+k\mid\text{train}} ,\qquad k=1,\dots,N_{\text{val}}.
+\]
+
+\begin{definition}[Error cuadrático medio de validación]
+La función objetivo que queremos minimizar es el MSE de validación:
+\[
+J(\alpha,m)
+  := \frac{1}{N_{\text{val}}} \sum_{k=1}^{N_{\text{val}}} \bigl(e_k(\alpha,m)\bigr)^2
+  = \frac{1}{N_{\text{val}}} \sum_{k=1}^{N_{\text{val}}}
+    \left( Z_{N_{\text{train}}+k}
+      - \hat Z_{N_{\text{train}}+k\mid\text{train}} \right)^2.
+\]
+\end{definition}
+
+Observación clave: \textbf{los pronósticos de validación se generan con el modelo entrenado únicamente en el segmento de entrenamiento}, por lo que $J(\alpha,m)$ es un verdadero error fuera de muestra.
+
+\subsection{Rejilla de búsqueda en $\alpha$ y $m$}
+
+Elegimos:
+
+\begin{itemize}
+  \item Una rejilla finita de suavizaciones:
+  \[
+    \alpha_1,\dots,\alpha_{K_\alpha} \in (0,1),
+  \]
+  típicamente un conjunto de puntos equiespaciados en $(0.01,0.99)$.
+
+  \item Un conjunto discreto de periodos estacionales candidatos:
+  \[
+    \mathcal{M} = \{m_1,\dots,m_{K_m}\} \subset \mathbb{N},
+  \]
+  por ejemplo $\{5,10,20\}$ para tratar de capturar patrones semanales, quincenales o mensuales.
+\end{itemize}
+
+Definimos la rejilla total
+\[
+\mathcal{G} = \{(\alpha_k,m_i): k=1,\dots,K_\alpha,\ i=1,\dots,K_m\}.
+\]
+
+Para cada par $(\alpha_k,m_i)\in\mathcal{G}$:
+
+\begin{enumerate}
+  \item Verificamos que $N_{\text{train}} \ge 2m_i$; si no se cumple, no podemos inicializar correctamente, y marcamos $J(\alpha_k,m_i)=\text{NaN}$.
+  \item En caso contrario, calculamos $J(\alpha_k,m_i)$ siguiendo el procedimiento anterior (actualizar sólo con entrenamiento y pronosticar validación).
+\end{enumerate}
+
+Finalmente, elegimos
+\[
+(\alpha^\ast,m^\ast)
+  \in \arg\min_{(\alpha_k,m_i)\in\mathcal{G}} J(\alpha_k,m_i).
+\]
+
+Es decir, el par de parámetros que produce el menor MSE de validación dentro de la rejilla considerada.
+
+\begin{remark}[Interpretación]
+El periodo estacional $m^\ast$ se selecciona \emph{por evidencia empírica de validación}. Si la serie realmente tiene una estacionalidad fuerte en niveles (por ejemplo semanal), el $m$ correspondiente tenderá a generar un $J(\alpha,m)$ menor que otros valores. Si la serie es esencialmente no estacional en niveles, la componente estacional ajustada tenderá a ser pequeña y distintos $m$ producirán resultados similares.
+\end{remark}
+
+\section{Ajuste final y pronóstico sobre validación + prueba}
+
+Una vez seleccionado $(\alpha^\ast,m^\ast)$:
+
+\begin{enumerate}
+  \item Reajustamos el modelo Holt--Winters aditivo en el conjunto de entrenamiento usando exactamente las mismas ecuaciones \eqref{eq:level}--\eqref{eq:season}, pero fijando $\alpha = \alpha^\ast$ y $m = m^\ast$.
+  \item Obtenemos:
+  \[
+    \ell_{N_{\text{train}}}^{\ast},\quad
+    b_{N_{\text{train}}}^{\ast},\quad
+    \bm{s}^\ast,\quad
+    p_{N_{\text{train}}}^\ast = (N_{\text{train}}-1) \bmod m^\ast.
+  \]
+  \item Definimos los pronósticos multi--paso, ahora tanto para validación como para prueba, como
+  \[
+  \hat Z_{N_{\text{train}} + h \mid \alpha^\ast, m^\ast}
+   = \ell_{N_{\text{train}}}^{\ast}
+     + h\, b_{N_{\text{train}}}^{\ast}
+     + s^\ast_{(p_{N_{\text{train}}}^\ast + h)\bmod m^\ast},
+   \qquad h = 1,\dots, N_{\text{val}}+N_{\text{test}}.
+  \]
+\end{enumerate}
+
+Los errores en el conjunto de prueba se calculan como
+\[
+e^{\text{test}}_k =
+  Z_{N_{\text{train}}+N_{\text{val}}+k}
+  - \hat Z_{N_{\text{train}}+N_{\text{val}}+k\mid \alpha^\ast,m^\ast},
+\qquad k=1,\dots,N_{\text{test}},
+\]
+y el MSE de prueba como
+\[
+\text{MSE}_{\text{test}}
+ = \frac{1}{N_{\text{test}}} \sum_{k=1}^{N_{\text{test}}} \bigl(e^{\text{test}}_k\bigr)^2.
+\]
+
+\section{Resumen simbólico}
+
+Resumiendo de forma compacta:
+
+\begin{itemize}
+  \item Dado $Z_t = \log P_t$, se propone el modelo aditivo
+  \[
+    Z_t = \ell_t + b_t + s_{p_t} + \varepsilon_t,\qquad p_t = (t-1)\bmod m.
+  \]
+  \item Se inicializa $(\ell_0,b_0,\bm{s})$ a partir de promedios de estaciones completas en el conjunto de entrenamiento.
+  \item Sobre $\{Z_t\}_{t=1}^{N_{\text{train}}}$ se actualizan los estados mediante:
+  \[
+  \boxed{
+  \begin{aligned}
+    \ell_t
+      &= \alpha\,(Z_t - s_{p_t}) 
+         + (1-\alpha)(\ell_{t-1}+b_{t-1}),\\
+    b_t
+      &= \alpha\,(\ell_t-\ell_{t-1})
+         + (1-\alpha)\,b_{t-1},\\
+    s_{p_t}
+      &= \alpha\,(Z_t - \ell_t)
+         + (1-\alpha)\,s_{p_t}.
+  \end{aligned}
+  }
+  \]
+  \item El pronóstico multi--paso desde el final de entrenamiento es:
+  \[
+  \boxed{
+    \hat Z_{N_{\text{train}}+h\mid\text{train}}
+    = \ell_{N_{\text{train}}} + h\,b_{N_{\text{train}}}
+      + s_{(p_{N_{\text{train}}}+h)\bmod m},
+    \quad h\ge1.
+  }
+  \]
+  \item La función objetivo de validación para un par $(\alpha,m)$ es
+  \[
+  \boxed{
+    J(\alpha,m)
+    = \frac{1}{N_{\text{val}}}
+      \sum_{k=1}^{N_{\text{val}}}
+      \bigl(
+        Z_{N_{\text{train}}+k}
+        - \hat Z_{N_{\text{train}}+k\mid\text{train}}
+      \bigr)^2.
+  }
+  \]
+  \item Se selecciona
+  \[
+  \boxed{
+    (\alpha^\ast,m^\ast)
+     \in \arg\min_{(\alpha,m)\in\mathcal{G}} J(\alpha,m).
+  }
+  \]
+  \item Finalmente, se rehace el ajuste sobre entrenamiento con $(\alpha^\ast,m^\ast)$ y se usa el modelo resultante para pronosticar tanto la parte de validación como la de prueba, sin emplear nunca esos datos para reentrenar o actualizar estados (sin fuga de información).
+\end{itemize}
+
+\end{document}

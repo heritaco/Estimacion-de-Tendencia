@@ -1,0 +1,327 @@
+\documentclass[11pt]{article}
+
+% Idioma / codificación
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+% Matemáticas
+\usepackage{amsmath}   % entornos de ecuaciones, \arg\min, \operatorname, etc.
+\usepackage{amssymb}   % símbolos extra
+\usepackage{amsfonts}
+\usepackage{amsthm}    % entornos theorem/definition/lemma
+\usepackage{bm}        % \bm para vectores/matrices en negritas
+\usepackage{mathtools} % extensiones de amsmath (opcional)
+
+% Hiperlinks
+\usepackage{hyperref}
+
+\begin{document}
+
+
+\section{Resumen, paso a paso, de lo que hicimos}
+
+En esta secci\'on explicamos, con palabras sencillas, qu\'e hace ahora
+nuestro c\'odigo despu\'es del cambio que hicimos para dejar de imponer
+que las diferencias $\Delta^d t_t$ sean constantes fuera del
+entrenamiento.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 1: Tenemos una serie y usamos log--precios}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{itemize}
+  \item Para cada activo (ticker) tenemos una serie de precios
+        \[
+          P_1, P_2, \dots, P_N.
+        \]
+  \item En lugar de trabajar con los precios directos, trabajamos con
+        los \emph{log--precios}
+        \[
+          Z_t := \log P_t, \qquad t = 1,\dots,N.
+        \]
+        Esto hace que los cambios porcentuales (retornos) se vuelvan
+        diferencias simples y la escala sea m\'as estable.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 2: Partimos la serie en train, validaci\'on y test}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Dividimos el tiempo en tres bloques consecutivos:
+
+\[
+  \underbrace{1,2,\dots,N_{\text{train}}}_{\text{entrenamiento}}
+  \quad|\quad
+  \underbrace{N_{\text{train}}+1,\dots,N_{\text{train}}+N_{\text{val}}}_{\text{validaci\'on}}
+  \quad|\quad
+  \underbrace{N_{\text{train}}+N_{\text{val}}+1,\dots,N}_{\text{test}}.
+\]
+
+\begin{itemize}
+  \item En \textbf{train} ajustamos el modelo de Guerrero.
+  \item En \textbf{validaci\'on} elegimos qu\'e tan suave debe ser la
+        tendencia (el par\'ametro $s$).
+  \item En \textbf{test} medimos el error final del pron\'ostico.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 3: Ajuste de Guerrero en el segmento de entrenamiento}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+En el tramo de entrenamiento tenemos los datos
+\[
+  Z_1, Z_2, \dots, Z_{N_{\text{train}}}.
+\]
+
+Queremos encontrar una \emph{tendencia suave}
+\[
+  t_1, t_2, \dots, t_{N_{\text{train}}}
+\]
+que:
+
+\begin{enumerate}
+  \item Est\'e cerca de los datos, es decir, que
+        \[
+          (Z_t - t_t)^2
+        \]
+        sea peque\~no para la mayor\'ia de los $t$ en train.
+
+  \item No cambie demasiado r\'apido: se penalizan las
+        \emph{diferencias de orden $d$}
+        \[
+          \Delta^d t_t,
+        \]
+        que son combinaciones lineales del tipo
+        \[
+          \Delta^d t_t \approx t_{t+d} - \binom{d}{1} t_{t+d-1}
+                            + \cdots + (-1)^d t_t.
+        \]
+\end{enumerate}
+
+El modelo de Guerrero para train se puede escribir, de forma simple,
+como:
+
+\[
+  \min_{\{t_t\},\,m}
+  \left[
+    \sum_{t=1}^{N_{\text{train}}} (Z_t - t_t)^2
+    \;+\;
+    \lambda
+    \sum_{t} (\Delta^d t_t - m)^2
+  \right],
+\]
+donde:
+
+\begin{itemize}
+  \item $\lambda > 0$ controla cu\'anta suavidad queremos.
+  \item $m$ es un escalar que representa la “media” de las diferencias
+        de orden $d$.
+  \item No imponemos que $\Delta^d t_t = m$ exactamente; solo
+        penalizamos que se aleje de $m$.
+\end{itemize}
+
+El resultado de este paso es:
+
+\[
+  \hat t_1, \dots, \hat t_{N_{\text{train}}}
+  \quad\text{y}\quad
+  \hat m,
+\]
+que son la tendencia suavizada en train y la media estimada de las
+diferencias.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 4: El problema original con el pron\'ostico}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Antes del cambio, para poder \emph{extender} la tendencia hacia
+validaci\'on y test, hicimos lo siguiente:
+
+\begin{itemize}
+  \item Fij\'abamos la tendencia ajustada en train:
+        \[
+          p_t = \hat t_t,
+          \qquad t = 1,\dots,N_{\text{train}}.
+        \]
+  \item Fuera del train impon\'iamos
+        \[
+          \Delta^d p_t = \hat m
+          \quad\text{para } t > N_{\text{train}}.
+        \]
+\end{itemize}
+
+Esto significa que, en el pron\'ostico, oblig\'abamos a que la
+diferencia de orden $d$ fuera \emph{exactamente constante}. Matem\'aticamente,
+eso hace que la trayectoria $p_t$ (train + forecast) sea un
+\textbf{polinomio de grado $d$} en el tiempo.
+
+Problema:
+
+\begin{itemize}
+  \item Guerrero nunca dice que $\Delta^d t_t$ tenga que ser constante,
+        solo que se penaliza el alejamiento de un $m$.
+  \item Al extrapolar imponiendo $\Delta^d t_t = \hat m$ estamos
+        introduciendo una suposici\'on extra: que fuera del train la
+        serie sigue un polinomio exacto, lo cual puede ser demasiado
+        r\'igido.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 5: Qu\'e cambio hicimos ahora}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+La idea nueva fue:
+
+\begin{quote}
+  Mantener la tendencia de Guerrero tal como est\'a en train, pero
+  cambiar por completo la forma en que la extendemos a validaci\'on y
+  test, sin imponer que $\Delta^d t_t$ sea constante.
+\end{quote}
+
+Entonces, ahora:
+
+\begin{enumerate}
+  \item \textbf{En train:} todo sigue igual.  
+        Para cada valor de suavidad $s$:
+        \begin{itemize}
+          \item usamos \texttt{fit\_for\_s} para obtener la tendencia
+                de Guerrero
+                \[
+                  \hat t_1,\dots,\hat t_{N_{\text{train}}},
+                \]
+          \item y la media de diferencias $\hat m$ (que se usa solo
+                dentro del solver, no en el pron\'ostico).
+        \end{itemize}
+
+  \item \textbf{En val + test:} en lugar de imponer
+        $\Delta^d p_t = \hat m$, buscamos una extensi\'on
+        \[
+          t_{N_{\text{train}}+1},\dots,t_N
+        \]
+        que sea lo m\'as suave posible, en este sentido:
+        \[
+          \min_{\{t_t\}_{t > N_{\text{train}}}}
+          \sum_{r} (\Delta^d t_r)^2,
+        \]
+        sujetando a que
+        \[
+          t_1,\dots,t_{N_{\text{train}}}
+          =
+          \hat t_1,\dots,\hat t_{N_{\text{train}}}.
+        \]
+        Es decir:
+        \begin{itemize}
+          \item mantenemos fijos los puntos de entrenamiento,
+          \item elegimos los puntos futuros para que la serie completa
+                (train + futuro) tenga las diferencias de orden $d$ lo
+                m\'as peque\~nas posibles.
+        \end{itemize}
+\end{enumerate}
+
+Intuitivamente:
+
+\begin{itemize}
+  \item Piensa en la serie $t_t$ como una cuerda discreta.
+  \item En train ya conocemos la forma de la cuerda.
+  \item Para los puntos futuros, la cuerda elige la forma m\'as suave
+        posible que contin\'ua la parte conocida, sin forzar una recta,
+        ni una parabola ni un polinomio de grado exacto.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 6: C\'omo se hace esto en el c\'odigo (idea sencilla)}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+En el c\'odigo definimos una funci\'on
+\texttt{extend\_trend\_minimum\_roughness} que hace exactamente esto:
+
+\begin{enumerate}
+  \item Crea la matriz de diferencias de orden $d$ sobre todo el
+        horizonte:
+        \[
+          K_{\text{full}}
+          \in \mathbb{R}^{(N-d)\times N}.
+        \]
+  \item Separa la serie $t_{\text{full}}$ en:
+        \[
+          t_{\text{full}} =
+          \underbrace{t_{\text{train}}}_{\text{conocido}}
+          \;\;\Vert\;\;
+          \underbrace{u}_{\text{desconocido (futuro)}}.
+        \]
+  \item Escribe la rugosidad como:
+        \[
+          \|K_{\text{full}} t_{\text{full}}\|^2
+          = \|K_k\,t_{\text{train}} + K_u\,u\|^2,
+        \]
+        donde $K_k$ son las columnas de train y $K_u$ las de futuro.
+  \item Minimizar la rugosidad respecto a $u$ lleva a un sistema
+        lineal:
+        \[
+          (K_u^\top K_u)\,u = - K_u^\top K_k\,t_{\text{train}},
+        \]
+        que resolvemos con \texttt{np.linalg.lstsq}.  
+        No hay $\lambda$ aqu\'i porque solo nos importa el minimizador,
+        no la escala.
+\end{enumerate}
+
+El resultado final es un vector
+\[
+  t_1,\dots,t_{N_{\text{train}}}, t_{N_{\text{train}}+1},\dots,t_N
+\]
+donde:
+
+\begin{itemize}
+  \item Los primeros $N_{\text{train}}$ son exactamente los de Guerrero.
+  \item Los restantes $N - N_{\text{train}}$ son la extensi\'on de
+        \emph{m\'inima rugosidad} que no fuerza $\Delta^d t_t$ a ser
+        constante.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Paso 7: RMSE y gr\'aficas con la nueva tendencia}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Una vez que tenemos la nueva tendencia extendida
+\[
+  t_1,\dots,t_N,
+\]
+hacemos lo de siempre:
+
+\begin{itemize}
+  \item Calculamos errores en cada segmento:
+        \begin{align*}
+          e_t^{\text{train}} &= t_t - Z_t
+            \quad (t \le N_{\text{train}}),\\
+          e_t^{\text{val}} &= t_t - Z_t
+            \quad (t \in \text{validaci\'on}),\\
+          e_t^{\text{test}} &= t_t - Z_t
+            \quad (t \in \text{test}).
+        \end{align*}
+  \item Calculamos RMSE simples y ponderadas en train, val, train+val
+        y test, como ya lo ten\'iamos definido.
+  \item Dibujamos:
+        \begin{itemize}
+          \item $Z_t$ (serie original).
+          \item La tendencia de Guerrero en train.
+          \item La tendencia extendida suave (train + futuro) con
+                l\'inea punteada.
+        \end{itemize}
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Resumen en una frase}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Antes: extrapol\'abamos como polinomio de grado $d$ imponiendo
+$\Delta^d t_t = \hat m$ fuera de train.
+
+Ahora: dejamos intacto Guerrero en train y, para val+test, construimos
+la extensi\'on m\'as suave posible (minimizando la rugosidad
+$\sum (\Delta^d t_t)^2$), sin imponer que las diferencias sean
+constantes.
+
+
+
+\end{document}

@@ -1,0 +1,641 @@
+\section{Descripción general del módulo \texttt{py103}: 
+Tendencia penalizada para una serie de precios}
+
+El objetivo del módulo es tratar una serie temporal de precios diarios
+(p.\,ej.\ NVDA) como un problema de regresión en el tiempo,
+aplicar varias transformaciones sobre el precio, ajustar una familia
+de modelos de regresión penalizada (Elastic Net polinomial en el índice de tiempo)
+y evaluar:
+
+\begin{itemize}
+  \item métricas de error no ponderadas y ponderadas (más peso a los días recientes),
+  \item tanto en el espacio transformado como en el espacio original de precios,
+  \item incluyendo diagnósticos de residuos (normalidad) y
+  \item una selección de modelo que balancea ``buen RMSE'' y
+        ``residuos lo más normales posible''.
+\end{itemize}
+
+A continuación se describe con detalle qué hace cada bloque del módulo
+y por qué.
+
+\subsection{Notación básica}
+
+Sea
+\[
+  \{P_t\}_{t=0}^{T-1}
+\]
+la serie de precios de cierre diario de una acción/índice
+(p.\,ej.\ NVDA), donde:
+\begin{itemize}
+  \item $t$ es un índice de tiempo entero (días consecutivos),
+  \item $T$ es el número total de observaciones, y
+  \item $P_t > 0$ es el precio de cierre en el día $t$.
+\end{itemize}
+
+Definimos también:
+\[
+  t \in \{0,1,\dots,T-1\}
+  \quad\Rightarrow\quad
+  x_t := t
+\]
+como la covariable (regresor) que representa el tiempo.
+
+En el módulo:
+\begin{itemize}
+  \item \texttt{download\_price\_series} descarga los precios diarios
+        desde Yahoo! Finance usando \texttt{yfinance} y devuelve
+        un \texttt{DataFrame} con índice de fechas y una columna
+        única \texttt{'close'} (la serie $\{P_t\}$).
+  \item Usamos siempre un \emph{split temporal} $60/20/20$:
+        \begin{align*}
+        N_{\text{train}} &= \bigl\lfloor 0.6\,T \bigr\rfloor,\\
+        N_{\text{val}}   &= \bigl\lfloor 0.2\,T \bigr\rfloor,\\
+        N_{\text{test}}  &= T - N_{\text{train}} - N_{\text{val}},
+        \end{align*}
+        y los índices de cada segmento se obtienen con
+        \texttt{\_segment\_indices} / \texttt{temporal\_split}.
+\end{itemize}
+
+\section{Transformaciones de la serie de precios}
+
+\subsection{Transformaciones $g:\mathbb{R}_+\to\mathbb{R}$ (precio $\to$ respuesta)}
+
+La idea central es no trabajar siempre directamente con $P_t$,
+sino con una versión transformada
+\[
+  Y_t = g(P_{0:T-1})_t,
+\]
+que puede estabilizar la varianza o aproximar estacionariedad
+(retornos, diferencias, etc.).
+
+El módulo \texttt{py103} define:
+
+\begin{align*}
+\texttt{"close"}:         &\quad Y_t = P_t,\\[0.3em]
+\texttt{"log\_close"}:    &\quad Y_t = \log P_t,\\[0.3em]
+\texttt{"sqrt\_close"}:   &\quad Y_t = \sqrt{P_t},\\[0.3em]
+\texttt{"diff\_close"}:   &\quad Y_t =
+  \begin{cases}
+    \text{NaN}, & t=0,\\
+    P_t - P_{t-1}, & t\ge 1,
+  \end{cases}\\[0.3em]
+\texttt{"simple\_return"}:&\quad Y_t =
+  \begin{cases}
+    \text{NaN}, & t=0,\\
+    \dfrac{P_t}{P_{t-1}} - 1, & t\ge 1,
+  \end{cases}\\[0.3em]
+\texttt{"log\_return"}:   &\quad Y_t =
+  \begin{cases}
+    \text{NaN}, & t=0,\\
+    \log P_t - \log P_{t-1}, & t\ge 1,
+  \end{cases}\\[0.3em]
+\texttt{"zscore\_log\_close"}:&\quad
+  Y_t = \dfrac{\log P_t - \mu_{\log P}}{\sigma_{\log P}},
+\end{align*}
+donde $\mu_{\log P}$ y $\sigma_{\log P}$ son la media y desviación
+estándar (muestrales) de toda la serie $\{\log P_t\}_{t=0}^{T-1}$.
+
+Todas estas transformaciones están registradas en el diccionario
+\texttt{TRANSFORM\_FUNCS} y se aplican a un vector de precios
+\texttt{prices}.
+
+\subsection{Enmascaramiento y construcción de $(X,y,\text{dates})$}
+
+\texttt{make\_transformed\_time\_regression\_data} hace:
+
+\begin{enumerate}
+  \item Extrae el vector de precios
+        $\mathbf{p} = (P_0,\dots,P_{T-1})^\top$ de la columna
+        \texttt{'close'}.
+  \item Aplica $g$ para obtener
+        $\mathbf{y}^{\text{raw}} = (Y_0,\dots,Y_{T-1})^\top$.
+  \item Construye una máscara booleana
+        \[
+          m_t = \mathbf{1}\{ Y_t \text{ es finito} \},
+        \]
+        y la aplica tanto a $Y_t$ como a las fechas.
+        Esto elimina los \texttt{NaN} introducidos por transformaciones
+        como retornos o diferencias en $t=0$.
+  \item Define la covariable de regresión:
+        \[
+          x_t = t, \quad t=0,\dots,N-1,
+        \]
+        donde $N$ es el número de puntos finitos restantes.
+        El diseño queda como
+        \[
+          X = 
+          \begin{bmatrix}
+            0\\
+            1\\
+            \vdots\\
+            N-1
+          \end{bmatrix}
+          \in\mathbb{R}^{N\times 1},
+          \quad
+          y = (Y_0,\dots,Y_{N-1})^\top.
+        \]
+  \item Devuelve $(X,y,\text{dates})$.
+\end{enumerate}
+
+En resumen: para cada transformación tenemos una serie
+transformada $y_t$ y un índice temporal $x_t$ sobre el que haremos regresión.
+
+\section{Modelo de regresión en el tiempo: Elastic Net polinomial}
+
+\subsection{Modelo polinomial en el tiempo}
+
+Para un grado polinomial $d\ge 1$, definimos el vector de características
+\[
+  \phi_d(x_t)
+  = \bigl( x_t,\; x_t^2,\; \dots,\; x_t^d \bigr)^\top \in \mathbb{R}^d.
+\]
+
+El modelo de tendencia en el espacio transformado es:
+\[
+  y_t = \beta_0 + \beta^\top \phi_d(x_t) + \varepsilon_t,
+  \quad t \in \mathcal{I}_{\text{train}},
+\]
+donde $\beta_0\in\mathbb{R}$, $\beta\in\mathbb{R}^d$
+y $\varepsilon_t$ es el residuo.
+
+En \texttt{build\_elastic\_net\_model} esto se implementa como:
+
+\begin{center}
+  \texttt{[ PolynomialFeatures(degree=d) ] $\rightarrow$ StandardScaler $\rightarrow$ ElasticNet}
+\end{center}
+
+con parámetros:
+\begin{itemize}
+  \item \texttt{alpha} $>0$ (intensidad de regularización),
+  \item \texttt{l1\_ratio}\,$\in[0,1]$ (mezcla Lasso/Ridge),
+  \item \texttt{poly\_degree} $= d$.
+\end{itemize}
+
+\subsection{Penalización Elastic Net}
+
+Sea $\tilde{X}\in\mathbb{R}^{N_{\text{train}}\times d}$
+la matriz de características (posiblemente estandarizadas) y
+$\tilde{y}\in\mathbb{R}^{N_{\text{train}}}$ los valores transformados.
+La Elastic Net resuelve, en esencia,
+\[
+  \min_{\beta_0,\beta}
+    \frac{1}{N_{\text{train}}}
+    \sum_{t\in\mathcal{I}_{\text{train}}}
+      \bigl( \tilde{y}_t - \beta_0 - \tilde{X}_t^\top\beta \bigr)^2
+    + \alpha\Bigl[
+      (1-\eta)\frac{\|\beta\|_2^2}{2} + \eta\|\beta\|_1
+    \Bigr],
+\]
+donde $\eta = \texttt{l1\_ratio}$ controla el balance entre
+penalización $\ell_2$ (Ridge) y $\ell_1$ (Lasso).
+
+\section{Split temporal y métricas de error ponderadas}
+
+\subsection{Split 60/20/20}
+
+\texttt{temporal\_split} y \texttt{\_segment\_indices} definen:
+
+\begin{align*}
+\mathcal{I}_{\text{train}} &= \{0,\dots,N_{\text{train}}-1\},\\
+\mathcal{I}_{\text{val}}   &= \{N_{\text{train}},\dots,N_{\text{train}}+N_{\text{val}}-1\},\\
+\mathcal{I}_{\text{test}}  &= \{N_{\text{train}}+N_{\text{val}},\dots,N-1\}.
+\end{align*}
+
+\subsection{RMSE no ponderado}
+
+La función
+\[
+  \texttt{rmse}(y,\hat{y})
+  = \sqrt{\frac{1}{n}\sum_{i=1}^n (y_i - \hat{y}_i)^2}
+\]
+se calcula en cada segmento (train, val, test, train\_val) mediante
+\texttt{compute\_segment\_metrics}.
+
+\subsection{RMSE linealmente ponderado}
+
+Para enfatizar los últimos días, definimos pesos
+\[
+  w_i \propto i+1, \quad i=0,\dots,n-1,
+  \quad\text{con}\quad
+  \sum_{i=0}^{n-1} w_i = 1.
+\]
+Entonces
+\[
+  \texttt{weighted\_rmse\_linear\_time}
+  = \sqrt{ \sum_{i=0}^{n-1} w_i (y_i - \hat{y}_i)^2 }.
+\]
+
+Esto se usa:
+\begin{itemize}
+  \item como \emph{métrica de evaluación} para cada segmento,
+  \item y también, más adelante, como esquema de \emph{entrenamiento}
+        (usando \texttt{sample\_weight}) en el modo
+        \texttt{train\_weight\_mode = "linear"}.
+\end{itemize}
+
+\subsection{RMSE exponencialmente ponderado}
+
+Definimos pesos exponenciales en el tiempo,
+controlando la razón ``último vs primero'':
+\[
+  \frac{w_{n-1}}{w_0} = R,\quad R = \texttt{ratio\_last\_first}.
+\]
+Esto induce
+\[
+  \gamma^{n-1} = R \quad\Rightarrow\quad \gamma = R^{1/(n-1)},
+\]
+y
+\[
+  w_i \propto \gamma^i,\quad i=0,\dots,n-1,\quad
+  \sum_i w_i = 1.
+\]
+La métrica
+\[
+  \texttt{weighted\_rmse\_exponential\_time}
+  = \sqrt{ \sum_{i=0}^{n-1} w_i (y_i - \hat{y}_i)^2 }
+\]
+asigna mucho más peso a los días más recientes.
+De nuevo, se usa tanto como métrica de evaluación como,
+en \texttt{\_fit\_and\_evaluate\_with\_train\_weight\_mode},
+como esquema de \emph{entrenamiento} (\texttt{train\_weight\_mode = "exp"}).
+
+\section{Espacio transformado vs espacio de precios}
+
+\subsection{Métricas en el espacio transformado}
+
+Cada vez que entrenamos un modelo,
+\texttt{\_fit\_and\_evaluate} y
+\texttt{\_fit\_and\_evaluate\_with\_train\_weight\_mode}
+devuelven, para cada segmento $S\in\{\text{train},\text{val},\text{test},\text{train\_val}\}$:
+\[
+  \text{metrics}_S^{(y)} =
+  \left\{
+    \texttt{rmse},\;
+    \texttt{rmse\_w\_linear},\;
+    \texttt{rmse\_w\_exp}
+  \right\},
+\]
+es decir, el error en el espacio de la transformación
+$Y_t$ (log-precios, retornos, etc.).
+
+\subsection{Métricas en el espacio original de precios}
+
+Para poder comparar transformaciones entre sí en las unidades
+originales (precio), se introdujo
+\texttt{compute\_price\_space\_metrics\_for\_model}:
+
+\begin{enumerate}
+  \item Reconstruye $(X_{\text{all}},y_{\text{all}},\text{dates})$ para una transformación $g$ fija.
+  \item Calcula $\hat{y}_t = f_{\hat{\theta}}(x_t)$ para todos los puntos.
+  \item Aplica una \emph{detransformación} $h$ para aproximar $P_t$:
+    \begin{itemize}
+      \item \texttt{"close"}:
+        $h(\hat{y}_t) = \hat{y}_t$.
+      \item \texttt{"log\_close"}:
+        $h(\hat{y}_t) = \exp(\hat{y}_t)$.
+      \item \texttt{"sqrt\_close"}:
+        $h(\hat{y}_t) = (\max\{\hat{y}_t,0\})^2$.
+      \item \texttt{"zscore\_log\_close"}:
+        $h(\hat{y}_t) = \exp(\hat{y}_t \sigma_{\log P} + \mu_{\log P})$.
+      \item \texttt{"diff\_close"}:
+        \begin{align*}
+        \hat{P}_0 &= P_0,\\
+        \hat{P}_t &= \hat{P}_{t-1} + \hat{y}_t,\quad t\ge 1.
+        \end{align*}
+      \item \texttt{"simple\_return"}:
+        \begin{align*}
+        \hat{P}_0 &= P_0,\\
+        \hat{P}_t &= \hat{P}_{t-1}(1+\hat{y}_t),\quad t\ge 1.
+        \end{align*}
+      \item \texttt{"log\_return"}:
+        \begin{align*}
+        \widehat{\log P}_0 &= \log P_0,\\
+        \widehat{\log P}_t &= \widehat{\log P}_{t-1} + \hat{y}_t,\\
+        \hat{P}_t &= \exp(\widehat{\log P}_t).
+        \end{align*}
+    \end{itemize}
+  \item Con $\hat{P}_t$ y $P_t$ alineados, se define para cada segmento $S$
+        el mismo trío de métricas:
+        \[
+          \text{metrics}_S^{(P)} =
+          \left\{
+            \texttt{rmse},\;
+            \texttt{rmse\_w\_linear},\;
+            \texttt{rmse\_w\_exp}
+          \right\},
+        \]
+        ahora en unidades de precio.
+\end{enumerate}
+
+Así, \texttt{run\_transform\_experiment} y
+\texttt{run\_all\_transforms\_experiment} imprimen simultáneamente
+métricas en el espacio transformado y en el espacio de precios.
+
+\section{Experimentos de alto nivel}
+
+\subsection{\texttt{run\_transform\_experiment}}
+
+Para un \emph{solo} tipo de transformación (p.\,ej.\ \texttt{"log\_close"}):
+
+\begin{enumerate}
+  \item Descarga la serie \texttt{df} de Yahoo!.
+  \item Construye $(X,y,\text{dates})$.
+  \item Ajusta un modelo Elastic Net polinomial de grado
+        \texttt{poly\_degree}.
+  \item Calcula la varianza de $y$:
+        \[
+          \operatorname{Var}(Y) = \frac{1}{N}\sum_{t=0}^{N-1}
+              (Y_t - \bar{Y})^2.
+        \]
+  \item Calcula métricas en el espacio transformado y en el espacio de precios,
+        para train/val/test/train\_val.
+  \item Devuelve:
+        \begin{itemize}
+          \item un diccionario \texttt{result} con:
+                \begin{itemize}
+                  \item \texttt{"transform"},
+                  \item \texttt{"variance"},
+                  \item \texttt{"metrics"},
+                \end{itemize}
+          \item el modelo ajustado,
+          \item el \texttt{DataFrame} de precios.
+        \end{itemize}
+\end{enumerate}
+
+\subsection{\texttt{run\_all\_transforms\_experiment}}
+
+Para una lista de transformaciones
+(\texttt{None} $\Rightarrow$ todas las de \texttt{TRANSFORM\_FUNCS}):
+
+\begin{enumerate}
+  \item Descarga una sola vez la serie de precios.
+  \item Para cada transformación $g$:
+    \begin{itemize}
+      \item ajusta un modelo Elastic Net,
+      \item almacena sus métricas en espacio transformado y de precios.
+    \end{itemize}
+  \item Imprime un resumen por transformación.
+  \item Devuelve:
+    \begin{itemize}
+      \item \texttt{results[name]} con varianza y métricas,
+      \item \texttt{models[name]} con el modelo para esa transformación,
+      \item el \texttt{DataFrame} de precios.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{\texttt{run\_logprice\_experiment}}
+
+Es un \emph{wrapper} de retrocompatibilidad que fija
+\texttt{transform\_name = "log\_close"} y devuelve directamente
+\texttt{result["metrics"]}, el modelo y el \texttt{DataFrame}.
+
+\section{Entrenamiento ponderado en el tiempo}
+
+\subsection{\texttt{\_fit\_and\_evaluate\_with\_train\_weight\_mode}}
+
+Esta función extiende el entrenamiento para permitir
+tres esquemas de peso en los \emph{datos de entrenamiento}:
+
+\begin{itemize}
+  \item \texttt{"plain"}: sin pesos (\texttt{sample\_weight = None}).
+  \item \texttt{"linear"}: \texttt{sample\_weight} $\propto i+1$.
+  \item \texttt{"exp"}: \texttt{sample\_weight} exponenciales con
+        razón \texttt{ratio\_last\_first}.
+\end{itemize}
+
+Formalmente, en lugar del MSE simple
+\[
+  \frac{1}{N_{\text{train}}}
+  \sum_{t\in\mathcal{I}_{\text{train}}}
+    (y_t - \hat{y}_t)^2,
+\]
+minimizamos
+\[
+  \sum_{t\in\mathcal{I}_{\text{train}}}
+    w_t (y_t - \hat{y}_t)^2,
+\]
+con $w_t$ definidos según el modo.
+
+\subsection{\texttt{run\_weighted\_training\_comparison\_single\_transform}}
+
+Para una transformación fija (p.\,ej.\ \texttt{"log\_close"}):
+
+\begin{enumerate}
+  \item Ajusta tres modelos (uno por modo de peso en entrenamiento).
+  \item Para cada modo:
+    \begin{itemize}
+      \item calcula métricas en espacio transformado,
+      \item calcula métricas en espacio de precios.
+    \end{itemize}
+  \item Imprime, en particular, las métricas de validación
+        para comparar cuál esquema se comporta mejor.
+\end{enumerate}
+
+\subsection{\texttt{plot\_weighted\_training\_comparison}}
+
+Genera una figura con:
+\begin{itemize}
+  \item panel izquierdo: serie transformada $Y_t$ y tres curvas de tendencia
+        (plain / linear / exp) en el espacio de la transformación,
+  \item panel derecho: precios $P_t$ y tres tendencias destransformadas.
+\end{itemize}
+
+\section{Diagnóstico de residuos y normalidad}
+
+\subsection{\texttt{compute\_validation\_residuals\_transform\_and\_price}}
+
+Para un modelo ajustado:
+
+\begin{enumerate}
+  \item Reconstruye $y_t$ y $\hat{y}_t$.
+  \item Extrae solo el segmento de validación.
+  \item Destransforma para obtener $P_t$ y $\hat{P}_t$ en validación.
+  \item Devuelve:
+    \begin{itemize}
+      \item \texttt{resid\_y\_val} $= y_t - \hat{y}_t$,
+      \item \texttt{resid\_p\_val} $= P_t - \hat{P}_t$,
+      \item fechas y valores ajustados correspondientes.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{\texttt{compute\_normality\_stats}}
+
+Dado un vector de residuos $\{e_i\}$, calcula:
+
+\begin{align*}
+\bar{e} &= \frac{1}{n}\sum_i e_i,\\
+s^2    &= \frac{1}{n-1}\sum_i (e_i - \bar{e})^2,\\
+\text{skew} &= \frac{1}{n}\sum_i
+  \biggl(\frac{e_i - \bar{e}}{s}\biggr)^3,\\
+\text{kurt\_excess} &= 
+  \frac{1}{n}\sum_i
+  \biggl(\frac{e_i - \bar{e}}{s}\biggr)^4 - 3.
+\end{align*}
+
+Además, calcula la estadística de Jarque--Bera:
+\[
+  \text{JB}
+  = \frac{n}{6}\left(
+      \text{skew}^2 +
+      \frac{\text{kurt\_excess}^2}{4}
+    \right),
+\]
+con $p$--valor bajo la aproximación $\chi^2_2$.
+
+\subsection{\texttt{plot\_validation\_residual\_diagnostics}}
+
+Para un modelo y transformación dados, puede trabajar en:
+
+\begin{itemize}
+  \item espacio transformado: residuos $e_t = y_t - \hat{y}_t$,
+  \item espacio de precios: residuos $e_t = P_t - \hat{P}_t$.
+\end{itemize}
+
+Produce una figura $2\times 2$ con:
+\begin{enumerate}
+  \item Histograma + curva Normal ajustada.
+  \item QQ-plot frente a una Normal.
+  \item Residuos vs valores ajustados.
+  \item Residuos vs fecha.
+\end{enumerate}
+Además, imprime $\bar{e}$, $s$, t--estadístico para $H_0:\bar{e}=0$,
+$p$--valor, skewness y kurtosis-exceso.
+
+\section{Selección de modelo regularizada por normalidad}
+
+\subsection{\texttt{run\_normality\_regularized\_model\_single\_transform}}
+
+Para una transformación fija (p.\,ej.\ \texttt{"log\_close"}) y una grilla de hiperparámetros:
+\[
+  \alpha\in\mathcal{A},\quad
+  \eta\in\mathcal{L},\quad
+  d\in\mathcal{D},\quad
+  \text{modo}\in\{\text{plain, linear, exp}\},
+\]
+se exploran todas las combinaciones.
+
+Para cada combinación se hace:
+
+\begin{enumerate}
+  \item Entrenamiento con el modo de peso escogido
+        (\texttt{\_fit\_and\_evaluate\_with\_train\_weight\_mode}).
+  \item Cálculo de métricas en el espacio de precios (en particular
+        RMSE de validación $\text{RMSE}^{(P)}_{\text{val}}$).
+  \item Cálculo de residuos de validación en el espacio escogido
+        (\texttt{normality\_space = "price"} o \texttt{"transform"}),
+        y a partir de ellos la estadística JB.
+  \item Definición de una función objetivo
+        \[
+          \text{obj}
+          = w_{\text{rmse}}\cdot
+            \text{RMSE}^{(P)}_{\text{val}}
+          + w_{\text{jb}}\cdot
+            \text{JB},
+        \]
+        y se almacena todo en un diccionario de candidatos.
+\end{enumerate}
+
+El ``mejor'' modelo es el que minimiza $\text{obj}$.
+Se devuelve:
+\begin{itemize}
+  \item \texttt{best\_summary}: hiperparámetros óptimos, métricas y
+        estadísticas de normalidad,
+  \item \texttt{best\_model}: el \texttt{Pipeline} entrenado,
+  \item \texttt{all\_candidates}: detalles de todas las combinaciones,
+  \item el \texttt{DataFrame} de precios.
+\end{itemize}
+
+\section{Visualizaciones de alto nivel}
+
+\subsection{\texttt{plot\_transform\_trend} y \texttt{plot\_log\_trend}}
+
+\begin{itemize}
+  \item \texttt{plot\_transform\_trend} muestra la serie transformada
+        $Y_t$ separada por colores (train/val/test) y la curva de tendencia
+        ajustada (Elastic Net) sobre todo el rango temporal.
+  \item \texttt{plot\_log\_trend} es un wrapper específico para
+        \texttt{"log\_close"}.
+\end{itemize}
+
+\subsection{\texttt{plot\_price\_with\_exp\_trend}}
+
+Es un caso particular para log-precios: toma un modelo entrenado
+en \texttt{"log\_close"}, destransforma por exponencial y dibuja
+la serie $P_t$ junto con la curva $\exp(\hat{y}_t)$
+(separando colores por segmento).
+
+\subsection{\texttt{plot\_all\_transform\_trends} y 
+\texttt{plot\_all\_destransformed\_price\_trends}}
+
+Para cada transformación y su modelo correspondiente:
+
+\begin{itemize}
+  \item \texttt{plot\_all\_transform\_trends} recorre 
+        \texttt{transform\_names} y llama a
+        \texttt{plot\_transform\_trend} para cada una.
+  \item \texttt{plot\_all\_destransformed\_price\_trends} hace lo mismo
+        pero en el espacio de precios, usando
+        \texttt{plot\_destransformed\_price\_trend}.
+\end{itemize}
+
+\subsection{\texttt{subplot\_all\_transforms\_and\_destransforms}}
+
+Construye una figura compacta en forma de rejilla:
+
+\begin{itemize}
+  \item Cada fila corresponde a una transformación.
+  \item Columna izquierda: serie transformada $Y_t$ con su tendencia.
+  \item Columna derecha: $P_t$ con la tendencia destransformada.
+\end{itemize}
+
+Esto permite ver de un vistazo cómo cambian la forma de la serie
+y la suavidad de la tendencia según la transformación elegida.
+
+\section{Resumen conceptual}
+
+En síntesis, el módulo:
+
+\begin{enumerate}
+  \item Descarga una serie de precios y la convierte en un problema
+        de regresión en el tiempo.
+  \item Aplica múltiples transformaciones sobre el precio
+        (niveles, log, raíz, diferencias, retornos, z-score).
+  \item Ajusta modelos Elastic Net polinomiales en el índice temporal,
+        con posibilidad de entrenar enfatizando más los datos recientes.
+  \item Evalúa el ajuste tanto en el espacio transformado como
+        en el espacio original de precios,
+        usando RMSE no ponderado y dos variantes de RMSE ponderado.
+  \item Genera figuras que muestran:
+        \begin{itemize}
+          \item la tendencia en el espacio transformado,
+          \item la tendencia destransformada en el espacio de precios,
+          \item la comparación de distintos esquemas de peso.
+        \end{itemize}
+  \item Analiza los residuos de validación (histograma, QQ-plot,
+        residuo vs ajustado vs tiempo) y cuantifica su normalidad.
+  \item Implementa una selección de modelo que combina
+        ``buen desempeño predictivo'' (bajo RMSE de validación)
+        con ``residuos lo más normales posible'' (bajo Jarque--Bera),
+        explorando una grilla de hiperparámetros y modos de peso.
+\end{enumerate}
+
+En notación compacta, el corazón del enfoque puede resumirse como:
+\[
+  \boxed{
+  \hat{\theta}
+  = \arg\min_{\theta}
+    \Bigl[
+      \underbrace{
+        \text{RMSE}^{(P)}_{\text{val}}(\theta)
+      }_{\text{ajuste en precio}}
+      +
+      \lambda\,
+      \underbrace{
+        \text{JB}\bigl( e_{\text{val}}^{(*)}(\theta) \bigr)
+      }_{\text{normalidad de residuos}}
+    \Bigr]
+  }
+\]
+donde $\theta$ codifica $(\alpha,\eta,d,\text{modo de peso})$,
+$e_{\text{val}}^{(*)}$ son los residuos (en espacio de precios o transformado)
+y $\lambda$ captura el peso relativo que damos a la normalidad frente al RMSE.

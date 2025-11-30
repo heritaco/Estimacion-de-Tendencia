@@ -1,0 +1,1146 @@
+\documentclass[11pt]{article}
+
+% Idioma / codificación
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+% Matemáticas
+\usepackage{amsmath}   % entornos de ecuaciones, \arg\min, \operatorname, etc.
+\usepackage{amssymb}   % símbolos extra
+\usepackage{amsfonts}
+\usepackage{amsthm}    % entornos theorem/definition/lemma
+\usepackage{bm}        % \bm para vectores/matrices en negritas
+\usepackage{mathtools} % extensiones de amsmath (opcional)
+
+% Hiperlinks
+\usepackage{hyperref}
+
+% ==== Definición de entornos ====
+\theoremstyle{definition}
+\newtheorem{definition}{Definición}
+\newtheorem{lemma}{Lema}
+
+\begin{document}
+\section{Modelo técnico y algoritmo implementado}
+
+En esta sección formalizamos con detalle matemático lo que se ha
+implementado en el código \texttt{py12\_timeweighted.py} para ajustar
+tendencias penalizadas tipo Guerrero (2007) en una familia de series
+financieras y seleccionar el índice de suavización a partir de múltiples
+criterios de error.:contentReference[oaicite:0]{index=0}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Datos, universo de activos y transformación logarítmica}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Sea $k \in \{1,\dots,K\}$ el índice de activo (ticker) y
+$t \in \{1,\dots,N_k\}$ el índice de tiempo (días de negociación).
+
+\begin{itemize}
+  \item Para cada activo $k$ observamos precios de cierre
+        \[
+          P_{k,t} > 0, \qquad t = 1,\dots,N_k.
+        \]
+  \item En el estudio actual se consideran $K = 137$ activos mezclando:
+        acciones grandes (AAPL, MSFT, \dots), índices (\verb|^GSPC|,
+        \verb|^MXX|, \dots), criptomonedas (BTC--USD, ETH--USD, \dots)
+        y otros índices globales.
+\end{itemize}
+
+Sobre cada serie de precios $\{P_{k,t}\}$ se trabaja con
+\emph{log–precios}
+\[
+  Z_{k,t} := \log P_{k,t}, \qquad t = 1,\dots,N_k.
+\]
+
+Razones técnicas para trabajar con $\{Z_{k,t}\}$ en lugar de $\{P_{k,t}\}$:
+
+\begin{enumerate}
+  \item \textbf{Adición de log–retornos.}
+        Los log–retornos son
+        \[
+          R_{k,t}
+          := \log P_{k,t} - \log P_{k,t-1}
+          = Z_{k,t} - Z_{k,t-1},
+        \]
+        de modo que productos de factores porcentuales en precios
+        se convierten en sumas, lo cual es algebraicamente más estable.
+
+  \item \textbf{Escala y varianza.}
+        Cambios porcentuales similares producen amplitudes comparables
+        en $\{Z_{k,t}\}$ aunque los niveles de $P_{k,t}$ sean muy
+        distintos; esto reduce heterocedasticidad inducida por el nivel.
+
+  \item \textbf{Positividad.}
+        Si más adelante se requiere una tendencia sobre precios,
+        se puede reconstruir como
+        $\widehat P_{k,t} = \exp(\widehat t_{k,t}) > 0$.
+\end{enumerate}
+
+En el código, la carga de datos se realiza mediante
+\texttt{load\_sp500\_series} (para cualquier ticker compatible con
+Yahoo Finance), que devuelve $(t_k, Z_k, \text{meta})$ con
+$t_k = 0,\dots,N_k-1$ y, por defecto, \texttt{use\_log=True}.:contentReference[oaicite:1]{index=1}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Operador de diferencia y matriz de penalización}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Fijamos un orden de diferencia $d \in \{0,1,2,3,4\}$. Para una serie
+$\bm\tau = (\tau_0,\dots,\tau_{N-1})^\top \in \mathbb{R}^N$ definimos
+la $d$-ésima \emph{diferencia hacia adelante} en el índice $t$ por
+\[
+  (\Delta^d \tau)_t
+  :=
+  \sum_{k=0}^d (-1)^{d-k} \binom{d}{k} \tau_{t+k},
+  \qquad t = 0,\dots,N-d-1.
+\]
+
+\begin{definition}[Matriz de diferencias]
+Sea $N\in\mathbb{N}$ y $d\in\mathbb{N}_0$. Definimos
+$K \in \mathbb{R}^{(N-d)\times N}$ como la matriz que implementa
+$\Delta^d$ por la izquierda:
+\[
+  (K\bm\tau)_r = (\Delta^d\tau)_r,
+  \qquad r = 0,\dots,N-d-1.
+\]
+En componentes,
+\[
+  K_{r,j}
+  :=
+  \begin{cases}
+    (-1)^{d-(j-r)}\binom{d}{j-r}, & j \in \{r,\dots,r+d\}, \\[0.25em]
+    0, & \text{en otro caso.}
+  \end{cases}
+\]
+\end{definition}
+
+En el código, esto se construye mediante \texttt{difference\_matrix(N,d)}:
+
+\begin{itemize}
+  \item Para $d=0$ se devuelve $I_N$.
+  \item Para $d\ge1$ se genera el vector de coeficientes binomiales
+        \[
+          c_k = (-1)^{d-k} \binom{d}{k}, \quad k=0,\dots,d,
+        \]
+        y se colocan como \emph{ventanas deslizantes} a lo largo de
+        la diagonal de $K$.:contentReference[oaicite:2]{index=2}
+\end{itemize}
+
+A partir de $K$ definimos la matriz
+\[
+  B := K^\top K \in \mathbb{R}^{N\times N},
+\]
+que es simétrica semidefinida positiva (PSD), ya que para todo
+$\bm x \in \mathbb{R}^N$ se cumple
+\[
+  \bm x^\top B \bm x
+  = \|K\bm x\|_2^2 \;\ge\; 0.
+\]
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Descomposición espectral y matriz de suavización}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{definition}[Descomposición espectral de $B$]
+Sea $B = K^\top K$. Calculamos su descomposición espectral
+\[
+  B
+  = Q \Lambda Q^\top,
+\]
+donde $Q\in\mathbb{R}^{N\times N}$ es ortogonal
+($Q^\top Q = QQ^\top = I_N$) y
+$\Lambda = \operatorname{diag}(\lambda_1,\dots,\lambda_N)$
+contiene los autovalores reales no negativos de $B$.:contentReference[oaicite:3]{index=3}
+\end{definition}
+
+Para un parámetro de suavización $\lambda>0$ definimos la matriz
+\emph{de penalización} de Guerrero:
+\[
+  A(\lambda) := I_N + \lambda B \in \mathbb{R}^{N\times N}.
+\]
+
+Usando la descomposición espectral, obtenemos
+\[
+  A(\lambda)
+  = I_N + \lambda Q\Lambda Q^\top
+  = Q(I_N + \lambda \Lambda)Q^\top,
+\]
+y, en particular,
+\[
+  A(\lambda)^{-1}
+  = Q \,\operatorname{diag}\!\bigg(\frac{1}{1+\lambda\lambda_i}\bigg)_{i=1}^N
+      Q^\top.
+\]
+
+\begin{lemma}[Traza de $A(\lambda)^{-1}$]
+Se tiene
+\[
+  \operatorname{tr}\big(A(\lambda)^{-1}\big)
+  = \sum_{i=1}^N \frac{1}{1+\lambda\lambda_i}.
+\]
+\end{lemma}
+
+\begin{proof}
+Por invariancia de la traza bajo conjugación ortogonal,
+\[
+  \operatorname{tr}\big(A(\lambda)^{-1}\big)
+  = \operatorname{tr}\Big(
+      Q \operatorname{diag}\Big(\frac{1}{1+\lambda\lambda_i}\Big) Q^\top
+    \Big)
+  = \operatorname{tr}\Big(
+      \operatorname{diag}\Big(\frac{1}{1+\lambda\lambda_i}\Big)
+    \Big)
+  = \sum_{i=1}^N \frac{1}{1+\lambda\lambda_i}.
+\]
+\end{proof}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Índice de suavidad y mapeo $s \leftrightarrow \lambda$}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Guerrero propone un \emph{índice de suavidad crudo}
+\[
+  S_{\text{raw}}(\lambda)
+  :=
+  1 - \frac{1}{N}
+      \operatorname{tr}\big(A(\lambda)^{-1}\big)
+  =
+  1 - \frac{1}{N}
+      \sum_{i=1}^N \frac{1}{1+\lambda \lambda_i}.
+\]
+
+Este índice es creciente en $\lambda$ y toma valores entre $0$ y
+$S_{\max}$ con
+\[
+  S_{\max} = 1 - \frac{d}{N},
+\]
+valor asociado al ajuste cuando la tendencia se aproxima a un
+polinomio de grado $d$ (máxima suavidad posible dada la penalización
+en diferencias de orden $d$).
+
+\begin{definition}[Índice de suavidad normalizado]
+Definimos el índice adimensional
+\[
+  s_{\text{unit}}(\lambda)
+  :=
+  \frac{S_{\text{raw}}(\lambda)}{S_{\max}}
+  \in [0,1),
+\]
+y lo interpretamos como la fracción de ``suavidad máxima'' alcanzada
+por el ajuste. En la implementación se trabaja con $s_{\text{unit}}$
+(dominado por \texttt{s\_unit}) y se recupera $\lambda$ numéricamente
+a partir de la ecuación
+\[
+  S_{\text{raw}}(\lambda) = s_{\text{unit}}\,S_{\max}.
+\]
+\end{definition}
+
+En el código \texttt{lambda\_from\_s} se implementa este mapeo como
+una búsqueda unidimensional en $\lambda\ge0$:
+
+\begin{enumerate}
+  \item Se fija un objetivo
+        \[
+          \text{target} = s_{\text{unit}} \cdot S_{\max}.
+        \]
+  \item Se define
+        \[
+          S_{\text{raw}}(\lambda)
+          = 1 - \frac{1}{N}\sum_{i=1}^N \frac{1}{1+\lambda\lambda_i}
+        \]
+        usando los autovalores $\{\lambda_i\}$ precalculados de $B$.
+  \item Se construye un intervalo inicial $[0,\lambda_{\text{hi}}]$
+        ampliando $\lambda_{\text{hi}}$ (multiplicando por $10$)
+        hasta que $S_{\text{raw}}(\lambda_{\text{hi}})\ge\text{target}$.
+  \item Sobre ese intervalo se aplica un esquema de bisección que
+        actualiza
+        \[
+          \lambda_{\text{mid}} = \frac{1}{2}
+            (\lambda_{\text{lo}}+\lambda_{\text{hi}})
+        \]
+        y compara $S_{\text{raw}}(\lambda_{\text{mid}})$ con
+        \texttt{target} hasta que
+        \[
+          \big|S_{\text{raw}}(\lambda_{\text{mid}})
+             - \text{target}\big| < \texttt{tol}.
+        \]
+\end{enumerate}
+
+El resultado es un mapeo numéricamente estable
+$s_{\text{unit}}\mapsto \lambda$, que se reutiliza cada vez que se
+evalúa una función de pérdida en función de $s$.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Ajuste de tendencia penalizada y parámetro de deriva $m$}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Para una serie observada $\bm Z\in\mathbb{R}^N$ (por ejemplo, el
+segmento de entrenamiento de $Z_{k,t}$) Guerrero propone ajustar una
+tendencia $\bm t \in \mathbb{R}^N$ que resuelva
+\begin{equation}
+  \label{eq:guerrero-penalized}
+  \widehat{\bm t}(\lambda)
+  :=
+  \arg\min_{\bm t}
+  \left\{
+    \|\bm Z - \bm t\|_2^2
+    +
+    \lambda \sum_{r=0}^{N-d-1}
+      \bigl( (K\bm t)_r - m\bigr)^2
+  \right\},
+\end{equation}
+donde $m$ es un escalar que representa la media del proceso
+$\Delta^d t_t$ (deriva en diferencias de orden $d$). En la
+implementación, $m$ se estima de forma conjunta con $\bm t$ mediante
+un esquema de punto fijo.
+
+En notación matricial, sea
+\[
+  \bm u := K\bm t \in \mathbb{R}^{N-d}, \qquad
+  \bm 1 := (1,\dots,1)^\top \in \mathbb{R}^{N-d}.
+\]
+La penalización se puede escribir como
+\[
+  \sum_{r=0}^{N-d-1} \bigl(u_r - m\bigr)^2
+  = \|\bm u - m\bm 1\|_2^2.
+\]
+El gradiente respecto de $\bm t$, para $m$ fijo, da la ecuación
+normal
+\[
+  \Bigl(I_N + \lambda K^\top K\Bigr)\bm t
+  = \bm Z + \lambda m K^\top \bm 1.
+\]
+Definimos, como antes, $B=K^\top K$ y $K\bm 1\_{{\scriptscriptstyle (N-d)}} = K^\top\bm 1$.
+Entonces
+\[
+  A(\lambda)\bm t
+  = \bm Z + \lambda m K^\top\bm 1.
+\]
+
+\begin{definition}[Solución para $m$ fijo]
+Para un $m$ dado, definimos
+\[
+  \bm t(m,\lambda)
+  := A(\lambda)^{-1}\bigl(\bm Z + \lambda m K^\top\bm 1\bigr).
+\]
+\end{definition}
+
+El modelo impone además que $m$ sea la media de $\Delta^d t_t$, es decir
+$m = \frac{1}{N-d}\bm 1^\top K\bm t$. Esto induce una ecuación fija
+en $m$:
+\[
+  m
+  = \frac{1}{N-d}\bm 1^\top K\bm t(m,\lambda).
+\]
+
+En el código se resuelve iterativamente:
+
+\begin{enumerate}
+  \item Inicialización:
+        \[
+          m^{(0)} := \frac{1}{N-d}\bm 1^\top K\bm Z
+          = \text{media de las diferencias crudas de orden $d$ de $\bm Z$}.
+        \]
+  \item Dado $m^{(k)}$, se calcula
+        \[
+          \bm t^{(k)} :=
+          A(\lambda)^{-1}\bigl(\bm Z + \lambda m^{(k)} K^\top\bm 1\bigr),
+        \]
+        usando la representación espectral
+        $A(\lambda)^{-1} = Q \,\operatorname{diag}(\alpha_i) Q^\top$ con
+        $\alpha_i = 1/(1+\lambda\lambda_i)$.
+  \item Se actualiza
+        \[
+          m^{(k+1)} :=
+          \frac{1}{N-d}\bm 1^\top K \bm t^{(k)}.
+        \]
+  \item Se repiten los pasos hasta convergencia,
+        $\big|m^{(k+1)} - m^{(k)}\big| < \texttt{m\_tol}$, o hasta
+        un máximo de iteraciones.
+\end{enumerate}
+
+El resultado de este procedimiento es
+\[
+  (\widehat{\bm t}, \widehat m, \widehat\sigma^2,
+   \operatorname{diag}(A(\lambda)^{-1}), s_{\text{unit,real}})
+\]
+para cada valor de $s_{\text{unit}}$ pasado a la función
+\texttt{fit\_for\_s}, donde:
+
+\begin{itemize}
+  \item $\widehat{\bm t} = \widehat{\bm t}_{k}^{\mathrm{tr}}(d,s)$ es la
+        tendencia ajustada en el segmento de entrenamiento.
+  \item $\widehat m$ es la deriva estimada de $\Delta^d t_t$.
+  \item $\widehat\sigma^2$ es una estimación tipo GLS de la varianza
+        residual, con grados de libertad ajustados.
+  \item $\operatorname{diag}(A(\lambda)^{-1})$ se computa como
+        \[
+          \operatorname{diag}(A(\lambda)^{-1})
+          = (Q\odot Q)\,\bm\alpha,
+        \]
+        donde $\odot$ es el producto elemento a elemento, $\bm\alpha$
+        es el vector $(\alpha_1,\dots,\alpha_N)^\top$ y
+        $((Q\odot Q)\bm\alpha)_j = \sum_{i} \alpha_i Q_{ji}^2$.
+  \item $s_{\text{unit,real}}$ es el índice de suavidad
+        $S_{\text{raw}}(\lambda)/S_{\max}$ recalculado a partir de
+        la traza de $A(\lambda)^{-1}$.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Extensión polinómica global en diferencias}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+La penalización controla la estructura de $\Delta^d t_t$ en toda la
+serie. En la práctica, una vez ajustada $\widehat{\bm t}^{\mathrm{tr}}$
+sobre el segmento de entrenamiento de longitud $N^{\mathrm{tr}}$, se
+reconstruye una trayectoria polinómica global
+\[
+  \bm p^{(d,s)} = (p_0^{(d,s)},\dots,p_{N-1}^{(d,s)})^\top,
+\]
+que:
+
+\begin{itemize}
+  \item coincide con la tendencia ajustada en los últimos $d$ puntos de
+        entrenamiento;
+  \item satisface la ecuación en diferencias
+        \[
+          \Delta^d p_t^{(d,s)} = \widehat m,
+          \qquad \forall t,
+        \]
+        con $\widehat m$ la deriva obtenida arriba.
+\end{itemize}
+
+En el código esto se implementa en
+\texttt{build\_polynomial\_from\_train\_tail}.:contentReference[oaicite:4]{index=4}
+
+\paragraph{Anclaje y recursiones.}
+Sea $j_0 = N^{\mathrm{tr}}-1$ el último índice de entrenamiento,
+y $d_{\text{eff}} = \min(d,N^{\mathrm{tr}})$.
+
+\begin{enumerate}
+  \item Se anclan los últimos $d_{\text{eff}}$ puntos de entrenamiento
+        en el polinomio:
+        \[
+          p_{j_0-d_{\text{eff}}+1 : j_0}
+          := \widehat t^{\mathrm{tr}}_{N^{\mathrm{tr}}-d_{\text{eff}}+1
+            : N^{\mathrm{tr}}}.
+        \]
+  \item \textbf{Recursión hacia atrás}:
+        usando la relación
+        \[
+          \sum_{k=0}^{d_{\text{eff}}}
+            (-1)^{d_{\text{eff}}-k}\binom{d_{\text{eff}}}{k} p_{j+k}
+          = \widehat m,
+        \]
+        y resolviendo para $p_j$ en función de
+        $p_{j+1},\dots,p_{j+d_{\text{eff}}}$, se obtiene
+        \[
+          p_j =
+          (-1)^{d_{\text{eff}}}
+          \left(
+            \widehat m -
+            \sum_{k=1}^{d_{\text{eff}}}
+              (-1)^{d_{\text{eff}}-k}\binom{d_{\text{eff}}}{k}
+              p_{j+k}
+          \right),
+        \]
+        que se aplica para $j = j_0-d_{\text{eff}},\dots,0$.
+  \item \textbf{Recursión hacia adelante}:
+        análogamente, se utiliza una expresión basada en
+        $p_{i-d_{\text{eff}}},\dots,p_{i-1}$ para construir
+        $p_i$ para $i = j_0+1,\dots,N-1$.
+\end{enumerate}
+
+El resultado es que $\bm p^{(d,s)}$ es un polinomio en $t$ de grado
+$d$ cuyos coeficientes están determinados por la cola de
+$\widehat{\bm t}^{\mathrm{tr}}$ y la deriva $\widehat m$; esta
+trayectoria se interpreta como la ``tendencia extrapolada'' que usamos
+en validación y prueba.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Esquema de partición: entrenamiento, validación, prueba}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Para cada ticker $k$ se aplica un corte en tres partes contiguas sobre
+la serie $\bm Z_k$:
+
+\[
+  \bm Z_k
+  =
+  (\bm Z_k^{\mathrm{tr}},
+   \bm Z_k^{\mathrm{va}},
+   \bm Z_k^{\mathrm{te}}),
+\]
+donde
+\begin{align*}
+  \bm Z_k^{\mathrm{tr}} &= (Z_{k,1},\dots,Z_{k,N_k^{\mathrm{tr}}}),\\
+  \bm Z_k^{\mathrm{va}} &= (Z_{k,N_k^{\mathrm{tr}}+1},\dots,
+                            Z_{k,N_k^{\mathrm{tr}}+N_k^{\mathrm{va}}}),\\
+  \bm Z_k^{\mathrm{te}} &= (Z_{k,N_k^{\mathrm{tr}}+N_k^{\mathrm{va}}+1},
+                            \dots,Z_{k,N_k}).
+\end{align*}
+
+En la función \texttt{train\_val\_test\_split} se construye esta
+partición con fracciones aproximadas $0.6$ (entrenamiento) y $0.2$
+(validación), imponiendo mínimos \texttt{min\_train} y
+\texttt{min\_val}, y asignando el resto a prueba.:contentReference[oaicite:5]{index=5}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Funciones objetivo en $s$ y pesos temporales}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Para un orden $d$ fijo, y dados
+\[
+  (\bm Z^{\mathrm{tr}}, \bm Z^{\mathrm{va}}, \bm Z^{\mathrm{te}})
+\]
+de longitudes $N^{\mathrm{tr}}, N^{\mathrm{va}}, N^{\mathrm{te}}$
+(respectivamente), definimos, para cada $s$:
+
+\begin{enumerate}
+  \item Ajuste de Guerrero en entrenamiento:
+        \[
+          (\widehat{\bm t}^{\mathrm{tr}}(s), \widehat m(s), \lambda(s),\dots)
+          := \texttt{fit\_for\_s}(\bm Z^{\mathrm{tr}}, s).
+        \]
+  \item Construcción del polinomio global
+        $\bm p^{(d,s)}$ sobre todo el horizonte de longitud
+        $N = N^{\mathrm{tr}} + N^{\mathrm{va}} + N^{\mathrm{te}}$.
+        En particular
+        \[
+          \bm p^{\mathrm{tr}}(s) = \bm p^{(d,s)}_{1:N^{\mathrm{tr}}},
+          \quad
+          \bm p^{\mathrm{va}}(s) = \bm p^{(d,s)}_{N^{\mathrm{tr}}+1:
+                                                  N^{\mathrm{tr}}+N^{\mathrm{va}}},
+          \quad
+          \bm p^{\mathrm{te}}(s) = \bm p^{(d,s)}_{N^{\mathrm{tr}}+N^{\mathrm{va}}+1:
+                                                  N}.
+        \]
+  \item Errores por segmento:
+        \[
+          \bm e^{\mathrm{tr}}(s) := \bm p^{\mathrm{tr}}(s) - \bm Z^{\mathrm{tr}},
+          \quad
+          \bm e^{\mathrm{va}}(s) := \bm p^{\mathrm{va}}(s) - \bm Z^{\mathrm{va}},
+          \quad
+          \bm e^{\mathrm{te}}(s) := \bm p^{\mathrm{te}}(s) - \bm Z^{\mathrm{te}}.
+        \]
+        Para entrenamiento+validación,
+        \[
+          \bm e^{\mathrm{tv}}(s)
+          :=
+          \bigl(\bm e^{\mathrm{tr}}(s), \bm e^{\mathrm{va}}(s)\bigr) \in
+          \mathbb{R}^{N^{\mathrm{tr}}+N^{\mathrm{va}}}.
+        \]
+\end{enumerate}
+
+\paragraph{Objetivos no ponderados.}
+Definimos las MSE (objetivos) no ponderados:
+\begin{align*}
+  J_{\mathrm{tr}}(s)
+  &:= \frac{1}{N^{\mathrm{tr}}}
+      \|\bm e^{\mathrm{tr}}(s)\|_2^2,\\
+  J_{\mathrm{va}}(s)
+  &:= \frac{1}{N^{\mathrm{va}}}
+      \|\bm e^{\mathrm{va}}(s)\|_2^2,\\
+  J_{\mathrm{both}}(s)
+  &:= \frac{N^{\mathrm{tr}}J_{\mathrm{tr}}(s)
+        + N^{\mathrm{va}}J_{\mathrm{va}}(s)}
+          {N^{\mathrm{tr}}+N^{\mathrm{va}}}.
+\end{align*}
+
+\paragraph{Pesos temporales linealmente crecientes.}
+Para enfatizar errores hacia el final de cada segmento, definimos
+pesos
+\[
+  \tilde w_j^{(A)} := j,\quad
+  j=1,\dots,N^A,\quad A\in\{\mathrm{va},\mathrm{tv}\}
+\]
+y normalizamos
+\[
+  w_j^{(A)}
+  :=
+  \frac{\tilde w_j^{(A)}}{\sum_{u=1}^{N^A} \tilde w_u^{(A)}}
+  = \frac{2j}{N^A(N^A+1)}.
+\]
+El último índice tiene $N^A$ veces más peso que el primero.
+
+Las MSE ponderadas se definen como:
+\begin{align*}
+  J_{\mathrm{va},w}(s)
+  &:= \sum_{j=1}^{N^{\mathrm{va}}}
+        w_j^{(\mathrm{va})}
+        \bigl(e_j^{\mathrm{va}}(s)\bigr)^2,\\
+  J_{\mathrm{both},w}(s)
+  &:= \sum_{j=1}^{N^{\mathrm{tv}}}
+        w_j^{(\mathrm{tv})}
+        \bigl(e_j^{\mathrm{tv}}(s)\bigr)^2.
+\end{align*}
+
+En el código estas cinco funciones se computan en
+\texttt{analyze\_all\_objectives\_for\_d}: $J_{\mathrm{tr}}$,
+$J_{\mathrm{va}}$, $J_{\mathrm{both}}$, $J_{\mathrm{va},w}$ y
+$J_{\mathrm{both},w}$.:contentReference[oaicite:6]{index=6}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{RMSE no ponderadas y ponderadas por segmento}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Además de las MSE se reportan errores medios cuadrados raíz
+( RMSE ) por segmento, tanto simples como ponderados:
+
+\paragraph{RMSE no ponderadas.}
+\begin{align*}
+  \mathrm{RMSE}^{\mathrm{tr}}(s)
+  &:= \sqrt{\frac{1}{N^{\mathrm{tr}}}
+             \|\bm e^{\mathrm{tr}}(s)\|_2^2},\\
+  \mathrm{RMSE}^{\mathrm{va}}(s)
+  &:= \sqrt{\frac{1}{N^{\mathrm{va}}}
+             \|\bm e^{\mathrm{va}}(s)\|_2^2},\\
+  \mathrm{RMSE}^{\mathrm{te}}(s)
+  &:= \sqrt{\frac{1}{N^{\mathrm{te}}}
+             \|\bm e^{\mathrm{te}}(s)\|_2^2},\\
+  \mathrm{RMSE}^{\mathrm{tv}}(s)
+  &:= \sqrt{\frac{1}{N^{\mathrm{tr}}+N^{\mathrm{va}}}
+             \|\bm e^{\mathrm{tv}}(s)\|_2^2}.
+\end{align*}
+
+\paragraph{RMSE ponderadas.}
+Usando los pesos $w^{(\mathrm{tr})}$, $w^{(\mathrm{va})}$,
+$w^{(\mathrm{te})}$ y $w^{(\mathrm{tv})}$ (definidos de forma análoga
+con crecimiento lineal dentro de cada segmento), definimos
+\begin{align*}
+  \mathrm{RMSE}_{w}^{\mathrm{tr}}(s)
+  &:= \sqrt{\sum_{j=1}^{N^{\mathrm{tr}}}
+              w_j^{(\mathrm{tr})}
+              \bigl(e_j^{\mathrm{tr}}(s)\bigr)^2},\\
+  \mathrm{RMSE}_{w}^{\mathrm{va}}(s)
+  &:= \sqrt{\sum_{j=1}^{N^{\mathrm{va}}}
+              w_j^{(\mathrm{va})}
+              \bigl(e_j^{\mathrm{va}}(s)\bigr)^2},\\
+  \mathrm{RMSE}_{w}^{\mathrm{te}}(s)
+  &:= \sqrt{\sum_{j=1}^{N^{\mathrm{te}}}
+              w_j^{(\mathrm{te})}
+              \bigl(e_j^{\mathrm{te}}(s)\bigr)^2},\\
+  \mathrm{RMSE}_{w}^{\mathrm{tv}}(s)
+  &:= \sqrt{\sum_{j=1}^{N^{\mathrm{tr}}+N^{\mathrm{va}}}
+              w_j^{(\mathrm{tv})}
+              \bigl(e_j^{\mathrm{tv}}(s)\bigr)^2}.
+\end{align*}
+
+Estas RMSE se evalúan para cada mínimo local de cada función objetivo
+en \texttt{rmse\_all\_segments\_for\_s} y se imprimen en el
+\emph{verbose} del código, así como se utilizan en las figuras de
+\texttt{plot\_d\_train\_val\_test\_strict}.:contentReference[oaicite:7]{index=7}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Búsqueda sobre rejilla y detección de mínimos locales}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Para un $d$ fijo se define una rejilla uniforme de suavidad:
+\[
+  \mathcal{S}
+  = \{ s_1,\dots,s_M \}
+  \subset [s_{\min}, s_{\max}],
+\]
+típicamente con $M\approx 250$–$500$. Para cada $s_i$:
+
+\begin{enumerate}
+  \item Se calcula $\lambda(s_i)$ vía \texttt{lambda\_from\_s}.
+  \item Se ajusta $\widehat{\bm t}^{\mathrm{tr}}(s_i)$ y se construye
+        $\bm p^{(d,s_i)}$.
+  \item Se evalúan las cinco funciones objetivo
+        $J_{\mathrm{tr}}(s_i)$, $J_{\mathrm{va}}(s_i)$,
+        $J_{\mathrm{both}}(s_i)$, $J_{\mathrm{va},w}(s_i)$,
+        $J_{\mathrm{both},w}(s_i)$.
+\end{enumerate}
+
+Para cada objetivo $J(\cdot)$ con valores en la rejilla
+$\{J(s_i)\}_{i=1}^M$ se detectan mínimos locales discretos:
+
+\begin{definition}[Mínimo local discreto en la rejilla]
+Un índice $i\in\{2,\dots,M-1\}$ es candidato a mínimo local si
+\[
+  J(s_i) \le J(s_{i-1})
+  \quad\text{y}\quad
+  J(s_i) \le J(s_{i+1}),
+\]
+y $J(s_i)$ es finito. También se consideran los extremos $i=1$ y
+$i=M$ si satisfacen las desigualdades análogas.
+\end{definition}
+
+Cada candidato $(s_i,J(s_i))$ se puede refinar mediante
+\emph{golden–section search} sobre el intervalo local que lo rodea:
+
+\begin{enumerate}
+  \item Dado un candidato $i$, se elige un intervalo
+        $[a,b] \subset [s_{\min},s_{\max}]$ alrededor de $s_i$.
+  \item Se aplica el algoritmo de sección áurea: si definimos
+        $\varphi = (1+\sqrt{5})/2$, y $c,b$ como
+        \[
+          c = b - \frac{1}{\varphi}(b-a),
+          \qquad
+          d = a + \frac{1}{\varphi}(b-a),
+        \]
+        se evalúan $J(c)$ y $J(d)$ y se desecha el subintervalo donde
+        $J$ es mayor, repitiendo hasta alcanzar un número fijo de
+        iteraciones.
+  \item El punto medio del intervalo final se adopta como $s^\star$,
+        y $J(s^\star)$ como valor refinado.
+\end{enumerate}
+
+Esto se implementa de forma genérica en \texttt{find\_all\_local\_minima\_s}
+y \texttt{golden\_local}, y luego se reutiliza en
+\texttt{analyze\_all\_objectives\_for\_d} para cada uno de los cinco objetivos.:contentReference[oaicite:8]{index=8}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Resumen simbólico}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Para cada ticker $k$, orden de diferencia $d$ y parámetro de
+suavidad $s$:
+
+\begin{align*}
+  &\textbf{Matrices:}&
+  &K \in \mathbb{R}^{(N-d)\times N},
+    \quad B=K^\top K,
+    \quad A(\lambda) = I_N + \lambda B,\\[0.3em]
+  &\textbf{Espectral:}&
+  &B = Q\Lambda Q^\top,
+    \quad A(\lambda)^{-1} =
+      Q \operatorname{diag}\Big(\tfrac{1}{1+\lambda\lambda_i}\Big) Q^\top,\\[0.3em]
+  &\textbf{Suavidad:}&
+  &S_{\text{raw}}(\lambda)
+    = 1 - \frac{1}{N}\sum_{i=1}^N \frac{1}{1+\lambda\lambda_i},\quad
+    s_{\text{unit}}(\lambda) = \frac{S_{\text{raw}}(\lambda)}{1-d/N},\\[0.3em]
+  &\textbf{Trend Guerrero:}&
+  &\widehat{\bm t}^{\mathrm{tr}}(s),\ \widehat m(s)
+    \text{ a partir de punto fijo en }
+    m = \tfrac{1}{N-d}\bm 1^\top K \bm t,\\[0.3em]
+  &\textbf{Polinomio global:}&
+  &\bm p^{(d,s)} \text{ tal que }
+    \Delta^d p_t^{(d,s)} = \widehat m(s)
+    \text{ y } p_t^{(d,s)} \approx \widehat t_t^{\mathrm{tr}}(s)
+    \text{ en la cola de entrenamiento},\\[0.3em]
+  &\textbf{Errores:}&
+  &\bm e^{A}(s) = \bm p^{A}(s) - \bm Z^A,\quad
+    A\in\{\mathrm{tr},\mathrm{va},\mathrm{tv},\mathrm{te}\},\\[0.3em]
+  &\textbf{MSE/RMSE:}&
+  &J_A(s) = \frac{1}{N^A}\|\bm e^A(s)\|_2^2,\quad
+    J_{A,w}(s) = \sum_j w_j^{(A)}(e_j^A(s))^2,\\
+  &&&
+    \mathrm{RMSE}^A(s) = \sqrt{J_A(s)},\quad
+    \mathrm{RMSE}_w^A(s)
+      = \sqrt{\sum_j w_j^{(A)}(e_j^A(s))^2}.
+\end{align*}
+
+La tarea de selección de suavizado consiste en estudiar, para cada
+$(k,d)$, las curvas $s\mapsto J_{\bullet}(s)$ en una rejilla,
+identificar todos sus mínimos locales (posiblemente refinados por
+sección áurea) y caracterizar el desempeño asociado en términos de
+$\mathrm{RMSE}$ (simple y ponderada) en entrenamiento, validación y
+prueba.
+
+
+\newpage
+\section{Estructura polinómica de la tendencia y posibles extensiones}
+
+En esta sección explicamos con más detalle por qué la tendencia
+extrapolada que construimos es un polinomio de grado $d$, por qué en
+los experimentos se restringió a órdenes $d\in\{1,2,3,4\}$, y cómo se
+podría generalizar el modelo para que la tendencia pronosticada sea una
+serie suavizada más flexible y no necesariamente un polinomio de grado
+$fijo$.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Por qué la tendencia extrapolada es un polinomio de grado $d$}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Recordemos el operador de diferencia hacia adelante de orden $d$ sobre
+una sucesión $\{p_t\}_{t\in\mathbb{Z}}$:
+\[
+  (\Delta^d p)_t
+  :=
+  \sum_{k=0}^d (-1)^{d-k}\binom{d}{k}\,p_{t+k},
+  \qquad t\in\mathbb{Z}.
+\]
+
+En nuestro esquema de extensión, después de ajustar la tendencia de
+Guerrero en el segmento de entrenamiento, imponemos fuera de la muestra
+la condición
+\begin{equation}
+  \label{eq:delta-d-const}
+  \Delta^d p_t = \widehat m,
+  \qquad \text{para todo $t$ en el segmento extendido (val+test)},
+\end{equation}
+donde $\widehat m$ es la estimación de la media de $\Delta^d t_t$ que
+sale del ajuste penalizado.
+
+Tomando una diferencia adicional, se obtiene
+\[
+  \Delta^{d+1} p_t
+  = \Delta\bigl(\Delta^d p_t\bigr)
+  = \Delta(\widehat m)
+  = 0,
+\]
+es decir, la sucesión $\{p_t\}$ satisface
+\begin{equation}
+  \label{eq:d+1-diff-zero}
+  \Delta^{d+1} p_t = 0
+  \qquad\forall t.
+\end{equation}
+
+Lo anterior es la versión discreta de “la $(d+1)$-ésima derivada es
+cero”, que en el contexto continuo caracteriza a polinomios de grado a
+lo sumo $d$. En el contexto discreto se tiene el análogo siguiente.
+
+\begin{lemma}
+  \label{lem:poly-degree-d}
+  Sea $\{p_t\}_{t\in\mathbb{Z}}$ una sucesión real tal que
+  $\Delta^{d+1} p_t = 0$ para todo $t$. Entonces existe un polinomio
+  $q:\mathbb{Z}\to\mathbb{R}$ de grado a lo sumo $d$ tal que
+  \[
+    p_t = q(t),\qquad\forall t.
+  \]
+  Además, si $\Delta^d p_t = \widehat m \neq 0$ para todo $t$, el
+  polinomio $q$ tiene grado exactamente $d$.
+\end{lemma}
+
+\begin{proof}[Esbozo de demostración]
+La prueba se puede hacer por inducción en $d$ o usando la base
+combinatoria $\bigl\{\binom{t}{0},\dots,\binom{t}{d}\bigr\}$.
+
+\textbf{Base $d=0$.}  La condición $\Delta p_t = 0$ equivale a
+$p_{t+1}-p_t=0$, de donde $p_t$ es constante, es decir, un polinomio
+de grado $0$.
+
+\textbf{Paso inductivo.}  Supongamos que la afirmación es cierta para
+orden $d$. Sea ahora $d+1$ y supongamos $\Delta^{d+2} p_t=0$. Definamos
+$q_t := \Delta p_t = p_{t+1}-p_t$. Entonces
+\[
+  \Delta^{d+1} q_t
+  = \Delta^{d+1} (\Delta p_t)
+  = \Delta^{d+2} p_t
+  = 0.
+\]
+Por hipótesis inductiva, existe un polinomio $r(t)$ de grado a lo sumo
+$d$ tal que $q_t = r(t)$ para todo $t$. Esto es,
+\[
+  p_{t+1} - p_t = r(t),
+\]
+y por tanto
+\[
+  p_{t+1}
+  = p_0 + \sum_{u=0}^{t} r(u).
+\]
+Pero la suma finita de un polinomio de grado $d$ en $u$ es, de nuevo,
+un polinomio en $t$ de grado $d+1$ (esto es la versión discreta de que
+la integral de un polinomio de grado $d$ es un polinomio de grado
+$d+1$). Así, $p_t$ es polinómico de grado a lo sumo $d+1$.
+
+Aplicando el argumento con $d$ reemplazado por $d+1$ y la condición
+$\Delta^{d+1} p_t = 0$, se concluye que $p_t$ es polinomio de grado a
+lo sumo $d$. La afirmación sobre grado exactamente $d$ cuando
+$\Delta^d p_t$ es una constante no nula se deduce de que la diferencia
+de orden $d$ de un polinomio anula todos los términos de grado menor a
+$d$ y produce una constante proporcional al coeficiente de $t^d$.
+\end{proof}
+
+Aplicando el Lema \ref{lem:poly-degree-d} a nuestra extensión, la
+condición \eqref{eq:d+1-diff-zero} implica que la trayectoria
+extrapolada $\{p_t^{(d,s)}\}$ que construimos es exactamente un
+polinomio de grado $d$ (salvo casos degenerados donde la estimación
+$\widehat m$ resulte cero y otras constantes también se anulen).
+
+En otras palabras:
+\[
+  p_t^{(d,s)} = \beta_0 + \beta_1 t + \cdots + \beta_d t^d,
+  \qquad t = 1,\dots,N,
+\]
+para ciertos coeficientes $\beta_0,\dots,\beta_d$ que están completamente
+determinados por:
+
+\begin{itemize}
+  \item los últimos $d$ valores de la tendencia ajustada en
+        entrenamiento, y
+  \item el valor estimado de la deriva $\widehat m$ en diferencias de
+        orden $d$.
+\end{itemize}
+
+Este es el motivo estructural por el que, en el esquema actual, la
+tendencia que usamos para pronosticar en validación y prueba es
+\emph{siempre} un polinomio de grado $d$: imponemos explícitamente que
+la $(d+1)$-ésima diferencia sea cero y la $d$-ésima diferencia sea
+constante.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Por qué se consideraron solo $d=1,2,3,4$}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+En principio, el modelo permite considerar órdenes de diferencia
+arbitrarios $d=0,1,2,\dots$; en la práctica hemos restringido el
+análisis a $d\in\{1,2,3,4\}$ por razones tanto computacionales como
+estadísticas.
+
+\subsubsection*{Interpretación de los órdenes bajos}
+
+Los órdenes $d=1,2,3,4$ tienen una interpretación directa:
+
+\begin{itemize}
+  \item $d=1$: se penaliza $\Delta t_t$, por lo que la extensión
+        impone $\Delta t_t \approx \widehat m$ constante. La tendencia
+        extrapolada es aproximadamente \emph{lineal} en el tiempo
+        (nivel con deriva).
+
+  \item $d=2$: se penaliza $\Delta^2 t_t$, de modo que la tendencia
+        extrapolada tiene \emph{curvatura} constante (polinomio
+        cuadrático). Modela aceleraciones suaves en el nivel.
+
+  \item $d=3$ y $d=4$: permiten capturar patrones de cambio de
+        curvatura (tercer y cuarto grado), útiles si la tendencia de la
+        serie exhibe segmentos con distinta concavidad/convexidad o
+        inflexiones suaves.
+\end{itemize}
+
+Para datos financieros diarios (log–precios de acciones, índices y
+criptoactivos) estos cuatro órdenes ya cubren la mayoría de las
+formas suaves plausibles en horizontes no demasiado largos. Órdenes
+mucho mayores tienden a producir extrapolaciones muy oscilatorias en
+los bordes o polinomios demasiado “flexibles” que no tienen
+interpretación económica clara.
+
+\subsubsection*{Coste computacional y estabilidad numérica}
+
+Desde el punto de vista computacional:
+
+\begin{itemize}
+  \item La matriz de diferencias $K_d$ se vuelve más ancha y con
+        coeficientes binomiales crecientes al aumentar $d$, lo que hace
+        que $B_d = K_d^\top K_d$ tenga autovalores más dispersos y el
+        número de condición de $A(\lambda) = I + \lambda B_d$ crezca.
+
+  \item El cálculo de la descomposición espectral de $B_d$ (un paso
+        clave porque toda la mecánica se basa en $B_d = Q\Lambda Q^\top$)
+        es de complejidad cúbica en $N$ en general. Aunque se reutiliza
+        por orden $d$, el problema se multiplica por el número de
+        combinaciones (ticker, $d$, valor de $s$) que evaluamos.
+
+  \item Para cada $(\text{ticker}, d, s)$ se ejecuta, además, un
+        esquema iterativo de punto fijo para estimar $\widehat m$, que
+        se vuelve más inestable cuando $d$ es grande porque la
+        penalización actúa sobre diferencias de orden alto (magnificando
+        ruido numérico y errores en la cola).
+\end{itemize}
+
+En el experimento actual se trabaja con:
+
+\begin{itemize}
+  \item $K=137$ series,
+  \item $d\in\{1,2,3,4\}$ (4 órdenes),
+  \item una rejilla relativamente fina de $s$ (por ejemplo cientos de
+        puntos por orden),
+  \item y cinco funciones objetivo distintas (MSE en train, val,
+        train+val, val ponderada, train+val ponderada).
+\end{itemize}
+
+Esto ya implica del orden de decenas de miles de evaluaciones de
+\texttt{fit\_for\_s} por ejecución completa del estudio. Extender a
+$d=5,6,\dots$ multiplica casi linealmente (por el número de órdenes),
+pero en la práctica el tiempo crece más que linealmente debido a la
+mala condición numérica y a que se requieren más iteraciones en el
+punto fijo para que $m$ converja.
+
+\subsubsection*{Comportamiento de residuos para órdenes altos}
+
+Empíricamente, para órdenes $d>4$ se observa:
+
+\begin{itemize}
+  \item La tendencia extrapolada se aproxima a polinomios de grado
+        alto que, aunque ajustan muy bien el segmento de entrenamiento,
+        exhiben extrapolaciones poco razonables en validación y prueba
+        (crecimientos explosivos o curvaturas excesivas).
+
+  \item Los residuos en validación y prueba muestran patrones
+        sistemáticos (no “ruido blanco”) que indican sobreajuste del
+        segmento de entrenamiento.
+
+  \item La magnitud de los residuos en las colas (sobre todo en prueba)
+        aumenta, de modo que no hay ganancia clara frente a
+        $d\in\{1,2,3,4\}$.
+\end{itemize}
+
+Por estas razones se decidió, en esta primera etapa, restringirse a
+$d\in\{1,2,3,4\}$ y dejar la exploración de órdenes mayores como una
+extensión futura, posiblemente con regularización explícita sobre el
+grado efectivo de la tendencia (por ejemplo, usando criterios tipo
+AIC/BIC entre órdenes, o combinaciones convexas de penalizaciones de
+diferentes órdenes).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Cómo obtener tendencias pronosticadas no polinómicas}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+El carácter polinómico de la tendencia extrapolada proviene
+exclusivamente de la condición fuerte \eqref{eq:delta-d-const} (o
+equivalentemente \eqref{eq:d+1-diff-zero}). Si deseamos que la
+tendencia fuera de muestra no sea necesariamente un polinomio de grado
+$d$, sino una serie suavizada más general, hay varias extensiones
+posibles dentro del mismo marco penalizado.
+
+\subsubsection*{Suavizamiento sobre un horizonte extendido}
+
+Partimos del funcional penalizado, pero ahora sobre un horizonte
+extendido de longitud $N+H$, donde los últimos $H$ puntos corresponden
+a horizontes de pronóstico:
+
+\begin{equation}
+  \label{eq:extended-penalty}
+  J(\bm t)
+  :=
+  \sum_{t=1}^{N}
+    (Z_t - t_t)^2
+  \;+\;
+  \lambda
+  \sum_{r=1}^{N+H-d}
+    \bigl(\Delta^d t_r\bigr)^2,
+\end{equation}
+donde $\bm t = (t_1,\dots,t_{N+H})^\top$ y para $t>N$ no hay
+observaciones (no aparece $Z_t$ en el primer sumando).
+
+Observaciones:
+
+\begin{itemize}
+  \item En (\ref{eq:extended-penalty}) \emph{no} imponemos que
+        $\Delta^d t_r$ sea constante ni que $\Delta^{d+1} t_r = 0$; tan
+        solo penalizamos su magnitud cuadrática.
+
+  \item El segundo término define un operador de suavizamiento global
+        sobre toda la malla de tiempo $1,\dots,N+H$.
+\end{itemize}
+
+En forma matricial, sea $K_{\text{ext}}$ la matriz de diferencias de
+orden $d$ sobre el horizonte extendido $(N+H)$, y $W$ una matriz
+diagonal de pesos de observación:
+\[
+  W := \operatorname{diag}(w_1,\dots,w_{N+H}),\qquad
+  w_t :=
+  \begin{cases}
+    1, & t\le N,\\
+    0, & t>N.
+  \end{cases}
+\]
+Entonces
+\[
+  J(\bm t)
+  =
+  (\bm Z_{\text{ext}} - \bm t)^\top W (\bm Z_{\text{ext}} - \bm t)
+  + \lambda \|K_{\text{ext}}\bm t\|_2^2,
+\]
+donde
+$\bm Z_{\text{ext}} = (Z_1,\dots,Z_N,0,\dots,0)^\top\in\mathbb{R}^{N+H}$.
+El minimizador viene dado por
+\[
+  \widehat{\bm t}
+  =
+  \bigl(W + \lambda K_{\text{ext}}^\top K_{\text{ext}}\bigr)^{-1}
+  W\bm Z_{\text{ext}}.
+\]
+
+Las componentes $\widehat t_{N+1},\dots,\widehat t_{N+H}$ son entonces
+\emph{pronósticos suavizados} que:
+
+\begin{itemize}
+  \item siguen siendo “suaves” en el sentido de penalizar diferencias
+        de orden $d$, pero
+  \item ya no satisfacen $\Delta^{d+1} t_t = 0$, por lo que \emph{no}
+        son polinomios de grado $d$; en general, tienen la forma de una
+        extensión tipo spline discreta con curvatura controlada.
+\end{itemize}
+
+Desde el punto de vista de implementación, esto requiere:
+
+\begin{itemize}
+  \item construir $K_{\text{ext}}$ para el horizonte extendido,
+  \item resolver un sistema lineal de tamaño $(N+H)\times(N+H)$ (o
+        usar la descomposición espectral de $K_{\text{ext}}^\top K_{\text{ext}}$),
+  \item trabajar con pesos $w_t$ que “apaguen” la contribución de los
+        puntos futuros (sin observación) en el primer sumando.
+\end{itemize}
+
+Esta formulación entrega una tendencia pronosticada suavizada sin
+estructura polinómica rígida, aunque sigue controlada por el orden
+$d$ de las diferencias en el término de penalización.
+
+\subsubsection*{Relajar la constancia de $\Delta^d t_t$}
+
+Otra variante es mantener el horizonte original $1,\dots,N$ pero
+cambiar la forma de la penalización. En lugar de penalizar
+$(\Delta^d t_t - m)^2$ con un $m$ constante, podemos considerar un
+$“m_t”$ que varía lentamente:
+\[
+  J(\bm t, \bm m)
+  :=
+  \sum_{t=1}^{N} (Z_t - t_t)^2
+  + \lambda_1
+    \sum_{r=1}^{N-d} (\Delta^d t_r - m_r)^2
+  + \lambda_2 \sum_{r=2}^{N-d} (m_r - m_{r-1})^2.
+\]
+Aquí:
+
+\begin{itemize}
+  \item $\bm m = (m_1,\dots,m_{N-d})^\top$ es una “deriva local” de
+        $\Delta^d t_t$,
+  \item $\lambda_1$ controla qué tanto $\Delta^d t_r$ sigue a $m_r$,
+  \item $\lambda_2$ controla la suavidad de $\bm m$ en el tiempo.
+\end{itemize}
+
+El modelo anterior induce que $\Delta^d t_t$ sea suave pero no
+necesariamente constante, por lo que, de nuevo, la solución
+$\widehat{\bm t}$ no es un polinomio de grado $d$, sino una curva más
+flexible que puede cambiar gradualmente su “aceleración” de orden $d$.
+
+De forma análoga, el pronóstico se obtiene extrapolando el par
+$(\bm t, \bm m)$ bajo una dinámica suave (por ejemplo, asumiendo que
+los últimos pasos de $\bm m$ continúan). Esto ya es un modelo de mayor
+dimensión que el caso escalar $m$ de Guerrero, pero permanece dentro
+del marco de mínimos cuadrados penalizados.
+
+\subsubsection*{Conexión con suavizadores clásicos}
+
+Si eliminamos por completo el parámetro $m$ y trabajamos con la
+penalización
+\[
+  J(\bm t)
+  =
+  \sum_{t=1}^{N} (Z_t - t_t)^2
+  + \lambda \sum_{r=1}^{N-d} (\Delta^d t_r)^2,
+\]
+obtenemos exactamente el suavizador tipo spline discreto que subyace a
+muchos \emph{P-splines} y modelos de tendencia local. La parte de
+ajuste en muestra (la trayectoria $\widehat t_1,\dots,\widehat t_N$) es
+idéntica a la que ya usamos en el interior de la muestra; la diferencia
+está en cómo definimos el comportamiento fuera de la muestra:
+
+\begin{itemize}
+  \item Si imponemos $\Delta^d t_t$ constante fuera de la muestra,
+        volvemos al caso polinómico.
+  \item Si definimos un horizonte extendido con penalización pura
+        (como en \eqref{eq:extended-penalty}), la tendencia de
+        pronóstico es una extensión suavizada, no polinómica.
+\end{itemize}
+
+En resumen:
+
+\[
+  \boxed{
+    \text{La tendencia extrapolada es polinómica de grado $d$
+    porque imponemos } \Delta^{d+1} t_t = 0.
+    \text{ Si relajamos esa condición y sólo penalizamos } \Delta^d t_t,
+    \text{ la tendencia de pronóstico pasa a ser una serie suavizada
+    más general.}
+  }
+\]
+
+
+
+\end{document}
