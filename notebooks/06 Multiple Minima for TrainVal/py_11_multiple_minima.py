@@ -11,7 +11,7 @@ For each differencing order d:
 
 """
 
-from typing import Callable, Tuple, Dict, Any, Optional
+from typing import Callable, List, Tuple, Dict, Any, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -697,11 +697,236 @@ def build_polynomial_from_train_tail(
     return poly
 
 
+
+def analyze_all_objectives_for_d(
+    solver: GuerreroSpectralSolver,
+    Z_train: np.ndarray,
+    Z_val: np.ndarray,
+    d: int,
+    s_min: float = 1e-3,
+    s_max: float = 0.999,
+    n_grid: int = 250,
+    refine: bool = True,
+    refine_iter: int = 20,
+    verbose: bool = True,
+    plot: bool = True,
+    meta: Optional[Dict[str, Any]] = None,
+    save_pdf_path: Optional[str] = None,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    For a fixed d, compute three objectives as functions of s:
+
+        J_train(s) : MSE on TRAIN (vs Δ^d polynomial)
+        J_val(s)   : MSE on VAL   (vs Δ^d polynomial)
+        J_both(s)  : combined MSE on TRAIN+VAL
+
+    Steps:
+      1) Evaluate all three on a grid of n_grid points in [s_min, s_max].
+      2) Detect all discrete local minima for each objective.
+      3) Optionally refine each minimum by local golden-section.
+
+    Returns dict with keys "train", "val", "both", each containing
+    arrays "s" and "J", plus grids for debugging.
+    """
+    Z_train = np.asarray(Z_train, dtype=float).ravel()
+    Z_val = np.asarray(Z_val, dtype=float).ravel()
+    N_train = Z_train.size
+    N_val = Z_val.size
+    N_total = N_train + N_val
+
+    if N_val == 0:
+        raise ValueError("Validation set is empty; cannot define J_val(s).")
+
+    # ---------- 1) evaluate on a grid ----------
+    s_grid = np.linspace(s_min, s_max, n_grid)
+    J_train_grid = np.empty_like(s_grid)
+    J_val_grid = np.empty_like(s_grid)
+    J_both_grid = np.empty_like(s_grid)
+
+    for i, s in enumerate(s_grid):
+        try:
+            t_hat, m_hat, lam, sigma2_hat, diag_Ainv, s_real = solver.fit_for_s(Z_train, s)
+        except Exception:
+            J_train_grid[i] = np.inf
+            J_val_grid[i] = np.inf
+            J_both_grid[i] = np.inf
+            continue
+
+        # polynomial on TRAIN+VAL only (we don't need TEST here)
+        poly = build_polynomial_from_train_tail(
+            t_hat_train=t_hat,
+            d=d,
+            m_hat=m_hat,
+            N_total=N_total,
+            N_train=N_train,
+        )
+        poly_train = poly[:N_train]
+        poly_val = poly[N_train:]
+
+        Jtr = float(np.mean((poly_train - Z_train) ** 2))
+        Jva = float(np.mean((poly_val - Z_val) ** 2))
+        Jbo = (N_train * Jtr + N_val * Jva) / (N_total)
+
+        J_train_grid[i] = Jtr
+        J_val_grid[i] = Jva
+        J_both_grid[i] = Jbo
+
+    # ---------- helpers to detect and refine local minima ----------
+    def detect_minima(J_grid: np.ndarray, J_fun: Callable[[float], float]):
+        J_cmp = np.array(J_grid)
+        J_cmp[~np.isfinite(J_cmp)] = np.inf
+
+        idx_cand = []
+        # interior points
+        for idx in range(1, n_grid - 1):
+            if not np.isfinite(J_cmp[idx]):
+                continue
+            if (J_cmp[idx] <= J_cmp[idx - 1]) and (J_cmp[idx] <= J_cmp[idx + 1]):
+                idx_cand.append(idx)
+        # endpoints
+        if np.isfinite(J_cmp[0]) and J_cmp[0] <= J_cmp[1]:
+            idx_cand.append(0)
+        if np.isfinite(J_cmp[-1]) and J_cmp[-1] <= J_cmp[-2]:
+            idx_cand.append(n_grid - 1)
+
+        s_list, J_list = [], []
+        for idx in idx_cand:
+            s0 = s_grid[idx]
+            if refine:
+                if 0 < idx < n_grid - 1:
+                    a = s_grid[idx - 1]
+                    b = s_grid[idx + 1]
+                elif idx == 0:
+                    a = s_grid[0]
+                    b = s_grid[1]
+                else:  # idx == n_grid - 1
+                    a = s_grid[-2]
+                    b = s_grid[-1]
+                s_star, J_star = golden_local(J_fun, a, b, n_iter=refine_iter)
+            else:
+                s_star, J_star = s0, J_grid[idx]
+
+            s_list.append(s_star)
+            J_list.append(J_star)
+
+        s_arr = np.array(s_list, dtype=float)
+        J_arr = np.array(J_list, dtype=float)
+        order = np.argsort(s_arr)
+        return s_arr[order], J_arr[order]
+
+    # J(s) functions for refinement
+    def J_train_fun(s: float) -> float:
+        try:
+            t_hat, m_hat, lam, sigma2_hat, diag_Ainv, s_real = solver.fit_for_s(Z_train, s)
+        except Exception:
+            return np.inf
+        poly = build_polynomial_from_train_tail(
+            t_hat_train=t_hat,
+            d=d,
+            m_hat=m_hat,
+            N_total=N_total,
+            N_train=N_train,
+        )
+        poly_train = poly[:N_train]
+        return float(np.mean((poly_train - Z_train) ** 2))
+
+    def J_val_fun(s: float) -> float:
+        try:
+            t_hat, m_hat, lam, sigma2_hat, diag_Ainv, s_real = solver.fit_for_s(Z_train, s)
+        except Exception:
+            return np.inf
+        poly = build_polynomial_from_train_tail(
+            t_hat_train=t_hat,
+            d=d,
+            m_hat=m_hat,
+            N_total=N_total,
+            N_train=N_train,
+        )
+        poly_val = poly[N_train:]
+        return float(np.mean((poly_val - Z_val) ** 2))
+
+    def J_both_fun(s: float) -> float:
+        try:
+            t_hat, m_hat, lam, sigma2_hat, diag_Ainv, s_real = solver.fit_for_s(Z_train, s)
+        except Exception:
+            return np.inf
+        poly = build_polynomial_from_train_tail(
+            t_hat_train=t_hat,
+            d=d,
+            m_hat=m_hat,
+            N_total=N_total,
+            N_train=N_train,
+        )
+        poly_train = poly[:N_train]
+        poly_val = poly[N_train:]
+        Jtr = float(np.mean((poly_train - Z_train) ** 2))
+        Jva = float(np.mean((poly_val - Z_val) ** 2))
+        return (N_train * Jtr + N_val * Jva) / (N_total)
+
+    # ---------- 2) detect + refine for each objective ----------
+    s_tr, J_tr = detect_minima(J_train_grid, J_train_fun)
+    s_va, J_va = detect_minima(J_val_grid, J_val_fun)
+    s_bo, J_bo = detect_minima(J_both_grid, J_both_fun)
+
+    if verbose:
+        print(f"\n[d={d}] TRAIN minima:")
+        for s_star, J_star in zip(s_tr, J_tr):
+            print(f"  s≈{s_star:.6f}, J_train≈{J_star:.6e}")
+        print(f"[d={d}] VAL minima:")
+        for s_star, J_star in zip(s_va, J_va):
+            print(f"  s≈{s_star:.6f}, J_val≈{J_star:.6e}")
+        print(f"[d={d}] BOTH minima:")
+        for s_star, J_star in zip(s_bo, J_bo):
+            print(f"  s≈{s_star:.6f}, J_both≈{J_star:.6e}")
+
+    # ---------- 3) plot ----------
+    if plot:
+        plt.figure(figsize=(8, 5))
+        ax = plt.gca()
+
+        ax.plot(s_grid, J_val_grid, label="J_val(s)", linewidth=1.5)
+        ax.plot(s_grid, J_train_grid, label="J_train(s)", linewidth=1.0)
+        ax.plot(s_grid, J_both_grid, label="J_both(s)", linewidth=1.0, linestyle="--")
+
+        if len(s_va) > 0:
+            ax.scatter(s_va, J_va, s=60, marker="o", color="C0", label="val minima")
+        if len(s_tr) > 0:
+            ax.scatter(s_tr, J_tr, s=60, marker="s", color="C1", label="train minima")
+        if len(s_bo) > 0:
+            ax.scatter(s_bo, J_bo, s=80, marker="*", color="C2", label="both minima")
+
+        ax.set_title(f"Local minima of J_train, J_val, J_both for d={d}")
+        ax.set_xlabel("s")
+        ax.set_ylabel("MSE")
+        ax.legend()
+        ax.grid(True, linestyle=":", alpha=0.4)
+        plt.tight_layout()
+        # save as pdf
+        if save_pdf_path is not None and meta is not None:
+            # create the path
+            path_and_name = f"{save_pdf_path}/{meta['ticker']}/"
+            import os 
+            os.makedirs(os.path.dirname(path_and_name), exist_ok=True)
+            plt.savefig(f"{path_and_name}allobjectives_d_{d}.pdf")
+        plt.show()
+
+    return {
+        "train": {"s": s_tr, "J": J_tr},
+        "val":   {"s": s_va, "J": J_va},
+        "both":  {"s": s_bo, "J": J_bo},
+        "s_grid": s_grid,
+        "J_train_grid": J_train_grid,
+        "J_val_grid": J_val_grid,
+        "J_both_grid": J_both_grid,
+    }
+
+
+
 # ============================================================
 #  Main
 # ============================================================
 
-def main(ticker: str = "NVDA", start: str = "2010-01-01", save_pdf_path: Optional[str] = None):
+def main(ticker: str = "NVDA", start: str = "2010-01-01", save_pdf_path: Optional[str] = None, d_list = [1, 2, 3]):
     # 1. Load S&P 500
     t_all, Z_all, meta = load_sp500_series(
         ticker=ticker,
@@ -710,6 +935,11 @@ def main(ticker: str = "NVDA", start: str = "2010-01-01", save_pdf_path: Optiona
         use_log=True,
         csv_path=None,  # or path to CSV with Date / Adj Close
     )
+    if save_pdf_path is not None:
+        # create the path
+        path_and_name = f"{save_pdf_path}/{meta['ticker']}/"
+        import os 
+        os.makedirs(os.path.dirname(path_and_name), exist_ok=True)
 
     print(
         f"Loaded {meta['ticker']} from {meta['start']} to {meta['end']} "
@@ -727,71 +957,64 @@ def main(ticker: str = "NVDA", start: str = "2010-01-01", save_pdf_path: Optiona
     print(f"Train length = {N_train}, val = {N_val}, test = {N_test}.")
 
     # 3. Build spectral solvers per d (for train length)
-    d_list = [2]   # extend if numerically stable
     solvers: Dict[int, GuerreroSpectralSolver] = {}
     for d in d_list:
         print(f"\n=== Building spectral solver for d={d} ===")
         solvers[d] = GuerreroSpectralSolver(N_train, d)
 
     # 4. For each d, find ALL local minima in s
+        # 4. For each d, analyze ALL objectives and their local minima
     all_minima_by_d: Dict[int, Dict[str, Any]] = {}
     for d in d_list:
         solver = solvers[d]
 
-        def J_d(s: float, _solver=solver, _d=d) -> float:
-            if N_val == 0:
-                return np.nan
-            try:
-                t_hat, m_hat, lam, sigma2_hat, diag_Ainv, s_real = _solver.fit_for_s(Z_train, s)
-            except Exception:
-                return np.inf
-            t_fore = forecast_trend(t_hat, d=_d, m_hat=m_hat, h=N_val)
-            return float(np.mean((t_fore - Z_val) ** 2))
-
-        print(f"\n=== Finding all local minima in s for d={d} ===")
-        s_all, J_all = find_all_local_minima_s(
-            J_d,
+        print(f"\n=== Analyzing objectives & local minima for d={d} ===")
+        res = analyze_all_objectives_for_d(
+            solver=solver,
+            Z_train=Z_train,
+            Z_val=Z_val,
             d=d,
             s_min=1e-3,
             s_max=0.999,
-            n_grid=400,       # grid resolution in s
+            n_grid=250,       # you can increase for finer resolution
             refine=True,
-            refine_iter=25,
+            refine_iter=20,
             verbose=True,
             plot=True,
             meta=meta,
             save_pdf_path=save_pdf_path,
         )
-        all_minima_by_d[d] = dict(s_all=s_all, J_all=J_all)
+        all_minima_by_d[d] = res
+
 
     # 5. Visualizations per d with strict train/val/test, for ALL local minima
+    # 5. Visualizations per d with strict train/val/test, for ALL minima
     for d in d_list:
-        if d not in all_minima_by_d:
-            print(f"\n--- Skipping d={d}: no minima stored ---")
-            continue
-
         solver = solvers[d]
-        s_all = all_minima_by_d[d]["s_all"]
-        J_all = all_minima_by_d[d]["J_all"]
+        res = all_minima_by_d[d]
 
-        for k, (s_star, J_star) in enumerate(zip(s_all, J_all), start=1):
-            if not np.isfinite(s_star) or not np.isfinite(J_star):
-                continue
-            print(
-                f"\n--- Plotting train/val/test for d={d}, "
-                f"local minimum {k}/{len(s_all)}, "
-                f"s≈{s_star:.4f}, val_MSE≈{J_star:.6e} ---"
-            )
-            plot_d_train_val_test_strict(
-                Z_all=Z_all,
-                N_train=N_train,
-                N_val=N_val,
-                d=d,
-                s_unit=s_star,
-                solver=solver,
-                meta=meta,
-                save_pdf_path=save_pdf_path,
-            )
+        for obj_name in ["val", "train", "both"]:
+            s_all = res[obj_name]["s"]
+            J_all = res[obj_name]["J"]
+            for k, (s_star, J_star) in enumerate(zip(s_all, J_all), start=1):
+                if not np.isfinite(s_star) or not np.isfinite(J_star):
+                    continue
+                print(
+                    f"\n--- Plotting train/val/test for d={d}, "
+                    f"{obj_name} minimum {k}/{len(s_all)}, "
+                    f"s≈{s_star:.4f}, MSE≈{J_star:.6e} ---"
+                )
+                plot_d_train_val_test_strict(
+                    Z_all=Z_all,
+                    N_train=N_train,
+                    N_val=N_val,
+                    d=d,
+                    s_unit=s_star,
+                    solver=solver,
+                    meta=meta,
+                    save_pdf_path=save_pdf_path,
+                )
+    
 
 
 if __name__ == "__main__":
