@@ -9,7 +9,6 @@ def mpl_apply():
     sns.set(
         style="whitegrid",
         palette="muted",
-        font="EB Garamond",
         font_scale=1.5,
         rc={
             "grid.linestyle": "--",
