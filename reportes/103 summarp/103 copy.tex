@@ -1,0 +1,344 @@
+
+\documentclass[11pt]{article}
+
+% Idioma / codificación
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+% Matemáticas
+\usepackage{amsmath}   % entornos de ecuaciones, \arg\min, \operatorname, etc.
+\usepackage{amssymb}   % símbolos extra
+\usepackage{amsfonts}
+\usepackage{amsthm}    % entornos theorem/definition/lemma
+\usepackage{bm}        % \bm para vectores/matrices en negritas
+\usepackage{mathtools} % extensiones de amsmath (opcional)
+
+% Hiperlinks
+\usepackage{hyperref}
+
+\begin{document}
+
+
+\newpage
+\section*{Transformaciones, regresión y ``destransformación'' de la serie}
+
+En esta sección explicamos con todo detalle qué está pasando en el módulo
+\texttt{py103.py}, especialmente en el caso de la transformación por diferencias
+(\texttt{diff\_close}), y aclaramos exactamente qué se está
+``destransformando'' cuando dibujamos la serie en el espacio original de precios.
+
+\subsection*{1. Notación básica}
+
+\begin{itemize}
+  \item Sea $t \in \{0,1,\dots,n-1\}$ el índice de tiempo discreto (días).
+  \item Sea $P_t$ el precio de cierre (\texttt{close}) de NVDA en el día $t$.
+  \item Sea $\mathcal{D} = \{(t,P_t)\}_{t=0}^{n-1}$ nuestra serie temporal.
+  \item Sea $g(\cdot)$ una transformación escalar aplicada a $P_t$.
+  \item Sea $y_t = g(P_{\bullet})$ el target transformado que realmente usamos en la regresión.
+\end{itemize}
+
+En el código, usamos varios $g$ distintos:
+\begin{align*}
+  \texttt{close}:       &\quad y_t = P_t,\\
+  \texttt{log\_close}:  &\quad y_t = \log P_t,\\
+  \texttt{diff\_close}: &\quad y_t = P_t - P_{t-1},\\
+  \texttt{simple\_return}: &\quad y_t = \frac{P_t - P_{t-1}}{P_{t-1}},\\
+  \texttt{log\_return}:    &\quad y_t = \log P_t - \log P_{t-1},
+\end{align*}
+etc.\ (para algunos $t$ iniciales, la serie se recorta o se rellena de forma
+conveniente; en el código lo manejamos con máscaras y \texttt{dropna}).
+
+\subsection*{2. Construcción del problema de regresión}
+
+El modelo de regresión que usamos es un polinomio en el tiempo $t$,
+regularizado con Elastic Net.
+
+\subsubsection*{2.1. Variable explicativa: índice de tiempo}
+
+Definimos el índice de tiempo
+\[
+  x_t = t \in \mathbb{R}, \qquad t = 0,1,\dots, n-1.
+\]
+En notación matricial,
+\[
+  X = 
+  \begin{bmatrix}
+    0\\
+    1\\
+    \vdots\\
+    n-1
+  \end{bmatrix}
+  \in \mathbb{R}^{n \times 1}.
+\]
+
+Si usamos un polinomio de grado $d$ en $t$, internamente aplicamos
+\texttt{PolynomialFeatures}:
+\[
+  \phi_d(t) = \bigl(t, t^2, \dots, t^d\bigr),
+\]
+y el diseño completo es
+\[
+  Z = \bigl[\phi_d(t_0)^\top;\; \phi_d(t_1)^\top;\; \dots;\; \phi_d(t_{n-1})^\top\bigr]
+  \in \mathbb{R}^{n \times d}.
+\]
+
+\subsubsection*{2.2. Variable respuesta: transformación de la serie}
+
+Dado un esquema de transformación $g$, construimos
+\[
+  y_t = g(P_{\bullet}), \qquad t \in \mathcal{I}_g,
+\]
+donde $\mathcal{I}_g \subseteq \{0,\dots,n-1\}$ es el conjunto de instantes
+para los que la transformación está bien definida (por ejemplo, para
+\texttt{diff\_close} empezamos en $t=1$ y ajustamos índices).
+
+En forma vectorial escribimos
+\[
+  y = (y_t)_{t \in \mathcal{I}_g} \in \mathbb{R}^m,
+\]
+donde $m = |\mathcal{I}_g|$.
+
+\subsubsection*{2.3. Separación en train / val / test}
+
+Ordenando por tiempo, dividimos $y$ y $X$ en tres segmentos contiguos:
+\begin{align*}
+  \text{train: } & t = 0,\dots, n_{\mathrm{train}}-1, \\
+  \text{val: }   & t = n_{\mathrm{train}},\dots, n_{\mathrm{train}}+n_{\mathrm{val}}-1, \\
+  \text{test: }  & t = n_{\mathrm{train}}+n_{\mathrm{val}},\dots,n-1.
+\end{align*}
+En el código usamos proporciones
+\[
+  \texttt{train\_frac} = 0.6, \quad
+  \texttt{val\_frac}   = 0.2, \quad
+  \text{resto} = 0.2 \text{ para test}.
+\]
+
+\subsection*{3. Modelo de regresión en el espacio transformado}
+
+El modelo es siempre una regresión lineal sobre las features polinomiales,
+regularizada con Elastic Net. En notación estadística:
+
+\[
+  y_t = f_\theta(t) + \varepsilon_t, \qquad t \in \mathcal{I}_g,
+\]
+donde
+\[
+  f_\theta(t) = \beta_0 + \beta_1 t + \beta_2 t^2 + \dots + \beta_d t^d
+\]
+(es decir, el modelo es lineal en los parámetros $\beta$, pero no en $t$),
+y $\varepsilon_t$ es el error.
+
+El ajuste se hace resolviendo
+\[
+  \hat{\theta} =
+  \underset{\theta}{\arg\min}\;\Bigg\{
+    \sum_{t \in \text{train}}
+    \bigl(y_t - f_\theta(t)\bigr)^2
+    + \lambda\left[
+      (1-\alpha)\|\theta\|_2^2 + \alpha\|\theta\|_1
+    \right]
+  \Bigg\},
+\]
+donde:
+\begin{itemize}
+  \item $\lambda = \texttt{alpha}$ en el código.
+  \item $\alpha = \texttt{l1\_ratio}$ controla la mezcla Lasso/Ridge.
+\end{itemize}
+
+El modelo ajustado produce, para cada $t$,
+\[
+  \hat{y}_t = f_{\hat{\theta}}(t).
+\]
+
+\subsection*{4. Caso especial: transformación de diferencias}
+
+Para \texttt{diff\_close}, definimos
+\[
+  D_t = P_t - P_{t-1}, \qquad t = 1,\dots,n-1.
+\]
+
+En la práctica:
+\begin{itemize}
+  \item Acomodamos los índices para que $y_t = D_t$ esté alineado con el
+        conjunto de fechas correspondiente.
+  \item Ajustamos el modelo
+    \[
+      D_t = f_\theta(t) + \varepsilon_t.
+    \]
+\end{itemize}
+
+Tras ajustar, tenemos un estimador suave de las diferencias diarias:
+\[
+  \hat{D}_t = f_{\hat{\theta}}(t).
+\]
+
+\subsection*{5. ``Destransformación'': reconstruir un \emph{trend} en el espacio de precios}
+
+El punto clave: \textbf{sólo destransformamos la salida del modelo
+$\hat{y}_t$, no la serie observada $y_t$}.
+
+\subsubsection*{5.1. Transformaciones directas (niveles, logaritmos, etc.)}
+
+Cuando $g$ es biyectiva punto a punto $P_t \mapsto y_t$, por ejemplo:
+
+\begin{itemize}
+  \item \texttt{close}: $y_t = P_t$, entonces $h(y_t) = y_t$.
+  \item \texttt{log\_close}: $y_t = \log P_t$, entonces $h(y_t) = e^{y_t}$.
+\end{itemize}
+
+Definimos una inversa $h$ tal que
+\[
+  h(g(P_t)) = P_t.
+\]
+
+En este caso, el \emph{trend} de precios que dibujamos es
+\[
+  \hat{P}_t = h(\hat{y}_t),
+\]
+y la banda de confianza en el espacio de precios es
+\[
+  \hat{P}_t^{\text{low}}  = h\bigl(\hat{y}_t + q_{\mathrm{low}}\bigr),\qquad
+  \hat{P}_t^{\text{high}} = h\bigl(\hat{y}_t + q_{\mathrm{high}}\bigr),
+\]
+donde $q_{\mathrm{low}},q_{\mathrm{high}}$ son cuantil(es) empíricos de los
+residuos en el \emph{espacio transformado}.
+
+\subsubsection*{5.2. Transformaciones acumulativas (diferencias, rendimientos)}
+
+Para \texttt{diff\_close}, el transform es
+\[
+  y_t = D_t = P_t - P_{t-1}.
+\]
+
+Ya no existe una inversa punto a punto $h$ que dependa sólo de $y_t$; la
+información de $P_t$ está codificada \emph{acumulativamente} en todos los
+incrementos previos. La relación verdadera es
+\[
+  P_t = P_0 + \sum_{s=1}^t D_s.
+\]
+
+En el modelo, sustituimos $D_s$ por el valor ajustado $\hat{D}_s$:
+\[
+  \hat{P}_t
+  = P_0 + \sum_{s=1}^t \hat{D}_s
+  = P_0 + \sum_{s=1}^t f_{\hat{\theta}}(s).
+\]
+
+En código se implementa como recursión:
+\begin{align*}
+  \hat{P}_0 &= P_0,\\
+  \hat{P}_t &= \hat{P}_{t-1} + \hat{D}_t,
+  \qquad t = 1,\dots,n-1.
+\end{align*}
+
+Esto produce un \textbf{trend suave} en el espacio de precios:
+\[
+  \hat{P}_t = \text{``precio suavizado''}
+\]
+porque $\hat{D}_t$ es una función suave de $t$ (polinomio regularizado).
+
+Análogamente, si usamos una banda empírica en el espacio de diferencias:
+\[
+  \hat{D}_t^{\mathrm{low}} = \hat{D}_t + q_{\mathrm{low}},\qquad
+  \hat{D}_t^{\mathrm{high}} = \hat{D}_t + q_{\mathrm{high}},
+\]
+reconstruimos las bandas de precio por
+\begin{align*}
+  \hat{P}_0^{\mathrm{low}} &= P_0,\qquad
+  \hat{P}_t^{\mathrm{low}} = \hat{P}_{t-1}^{\mathrm{low}} + \hat{D}_t^{\mathrm{low}},\\
+  \hat{P}_0^{\mathrm{high}} &= P_0,\qquad
+  \hat{P}_t^{\mathrm{high}} = \hat{P}_{t-1}^{\mathrm{high}} + \hat{D}_t^{\mathrm{high}}.
+\end{align*}
+
+\paragraph{Conclusión importante.}
+En el caso \texttt{diff\_close}:
+
+\begin{itemize}
+  \item Nunca reconstruimos $P_t$ usando los verdaderos incrementos $D_t$ en
+        la gráfica de \emph{trend}.
+  \item Siempre usamos los \emph{incrementos ajustados} $\hat{D}_t$ para
+        obtener una curva suave $\hat{P}_t$.
+  \item La serie observada $P_t$ se dibuja tal cual, con sus brincos; la
+        curva $\hat{P}_t$ es un suavizado.
+\end{itemize}
+
+Por eso, visualmente, la línea negra (trend) es continua y suave, mientras que
+la serie de puntos/segmentos de la serie cruda puede ser más ``salto a salto''.
+
+\subsection*{6. Qué se destransforma y qué no}
+
+Podemos resumir así:
+
+\begin{enumerate}
+  \item \textbf{Espacio transformado.}
+    \begin{itemize}
+      \item Datos observados: $y_t = g(P_{\bullet})$.
+      \item Modelo: $\hat{y}_t = f_{\hat{\theta}}(t)$.
+      \item Residuos: $r_t = y_t - \hat{y}_t$.
+    \end{itemize}
+  \item \textbf{Espacio de precios (destransformado).}
+    \begin{itemize}
+      \item Serie observada: $P_t$ se dibuja tal cual (\texttt{df["close"]}).
+      \item \textbf{Sólo destransformamos:}
+        \begin{itemize}
+          \item La curva de trend $\hat{y}_t \mapsto \hat{P}_t$.
+          \item Las bandas de confianza $\hat{y}_t + q \mapsto \hat{P}_t^{(\cdot)}$.
+        \end{itemize}
+    \end{itemize}
+\end{enumerate}
+
+En particular, nunca hacemos
+\[
+  y_t \xrightarrow{h} P_t^\star
+\]
+para luego sustituir $P_t$ por $P_t^\star$; es decir, no ``destransformamos'' la
+serie observada, sólo la salida del modelo.
+
+\subsection*{7. Ejemplo compacto: \texttt{diff\_close}}
+
+Para fijar ideas, el pipeline de \texttt{diff\_close} es:
+
+\begin{align*}
+  D_t &= P_t - P_{t-1},\\
+  D_t &= f_\theta(t) + \varepsilon_t,\\
+  \hat{D}_t &= f_{\hat{\theta}}(t),\\
+  \hat{P}_0 &= P_0,\\
+  \hat{P}_t &= \hat{P}_{t-1} + \hat{D}_t.
+\end{align*}
+
+Visualmente:
+
+\begin{itemize}
+  \item En la gráfica de \textbf{transformación} (\texttt{diff\_close}):
+    \[
+      \boxed{D_t \text{ observado (salta)} \quad vs \quad \hat{D}_t \text{ suave}.}
+    \]
+  \item En la gráfica de \textbf{precio}:
+    \[
+      \boxed{P_t \text{ observado (salta)} \quad vs \quad
+      \hat{P}_t = P_0 + \sum_{s=1}^t \hat{D}_s \text{ suave}.}
+    \]
+\end{itemize}
+
+\subsection*{8. Resumen simbólico}
+
+La idea central que explica tu observación sobre la línea continua es:
+
+\[
+  \boxed{
+    \begin{aligned}
+      & \text{(1) Transformamos la serie: } y_t = g(P_{\bullet}). \\
+      & \text{(2) Ajustamos } y_t \approx f_\theta(t)\ \Rightarrow\ \hat{y}_t. \\
+      & \text{(3) Construimos un \emph{trend} en precios: }
+        \hat{P}_t = H(\hat{y}_{0:t}),\\
+      &\quad\text{donde } H \text{ integra o invierte } g \text{ usando sólo la salida del modelo.}
+    \end{aligned}
+  }
+\]
+
+En el caso de diferencias, $H$ es la suma acumulada de incrementos ajustados;
+como éstos son suaves, la curva $\hat{P}_t$ es también suave y no reproduce los
+saltos originales de $P_t$, sino su tendencia estimada.
+
+\end{document}

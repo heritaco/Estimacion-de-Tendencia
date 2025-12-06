@@ -1499,6 +1499,315 @@ def plot_weighted_training_comparison(
     plt.show()
 
 
+# Add this to py103.py near the other plotting helpers
+# (right after plot_transform_trend is a good place).
+
+# REPLACE the previous `plot_transform_trend_with_empirical_ci` in py103.py
+# with this version that adds a RIGHT subplot in PRICE space.
+
+def plot_transform_trend_with_empirical_ci(
+    df: pd.DataFrame,
+    model: Pipeline,
+    transform_name: str,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+    ci_level: float = 0.95,
+    residual_source: str = "train_val",
+) -> None:
+    """
+    Plot 1x2 subplots:
+
+      LEFT  (TRANSFORM space):
+        - transformed series y_t (e.g. log_close),
+        - Elastic Net trend,
+        - NON-PARAMETRIC empirical CI built from residuals in TRANSFORM space.
+
+      RIGHT (PRICE space):
+        - original Close series,
+        - detransformed trend,
+        - same empirical CI mapped back to price space.
+
+    CI construction (purely in TRANSFORM space):
+        r_t = y_t - y_hat_t   (transform residuals)
+        - choose residual_source ∈ {'train', 'train_val', 'all'}
+        - let R = pool of residuals,
+        - α = 1 - ci_level,
+        - q_low, q_high = empirical quantiles of R at α/2 and 1-α/2,
+        - band in transform space:  y_hat_t + [q_low, q_high].
+
+    The band is then mapped to price space via the same inverse transform
+    used elsewhere in the module.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must contain 'close' and DatetimeIndex.
+    model : Pipeline
+        Fitted ElasticNet (with polynomial features, etc.).
+    transform_name : str
+        One of TRANSFORM_FUNCS keys (e.g. 'close', 'log_close', 'log_return').
+    train_frac, val_frac : float
+        Fractions for train / validation splits.
+    ci_level : float
+        e.g. 0.95 for 95% empirical CI.
+    residual_source : {'train', 'train_val', 'all'}
+        Which residuals (in TRANSFORM space) to use for CI.
+    """
+    if transform_name not in TRANSFORM_FUNCS:
+        raise ValueError(f"Unknown transform_name: {transform_name!r}")
+
+    if not (0.0 < ci_level < 1.0):
+        raise ValueError("ci_level must be in (0, 1).")
+
+    residual_source = residual_source.lower()
+    if residual_source not in {"train", "train_val", "all"}:
+        raise ValueError("residual_source must be 'train', 'train_val', or 'all'.")
+
+    # ---------- 1) Transformed series and fitted values ----------
+    X_all, y_all, dates = make_transformed_time_regression_data(
+        df, transform_name=transform_name, price_col="close"
+    )
+    y_hat_all = model.predict(X_all)
+    n = len(y_all)
+    if n == 0:
+        raise ValueError(
+            f"No finite points for transform '{transform_name}' "
+            f"when plotting empirical CI."
+        )
+
+    # Segment indices
+    idx_train, idx_val, idx_test, n_train, n_val, n_test = _segment_indices(
+        n, train_frac=train_frac, val_frac=val_frac
+    )
+
+    # ---------- 2) Residuals in TRANSFORM space ----------
+    resid_train = y_all[idx_train] - y_hat_all[idx_train]
+    resid_val = y_all[idx_val] - y_hat_all[idx_val]
+    resid_test = y_all[idx_test] - y_hat_all[idx_test]
+
+    if residual_source == "train":
+        resid_pool = resid_train
+    elif residual_source == "train_val":
+        resid_pool = np.concatenate([resid_train, resid_val])
+    else:  # 'all'
+        resid_pool = np.concatenate([resid_train, resid_val, resid_test])
+
+    if resid_pool.size < 2:
+        raise ValueError("Not enough residuals to build an empirical CI band.")
+
+    alpha = 1.0 - ci_level
+    q_low, q_high = np.quantile(
+        resid_pool,
+        [alpha / 2.0, 1.0 - alpha / 2.0],
+    )
+
+    lower_band = y_hat_all + q_low
+    upper_band = y_hat_all + q_high
+
+    # ---------- 3) Price series and detransformed band ----------
+    prices_all = df["close"].to_numpy(dtype=float).ravel()
+    prices = df.loc[dates, "close"].to_numpy(dtype=float).ravel()
+
+    # detransform y_hat_all → price_hat_all
+    # and bands → lower_price_band, upper_price_band
+    if transform_name == "close":
+        price_hat_all = y_hat_all
+        lower_price_band = lower_band
+        upper_price_band = upper_band
+
+    elif transform_name == "log_close":
+        price_hat_all = np.exp(y_hat_all)
+        lower_price_band = np.exp(lower_band)
+        upper_price_band = np.exp(upper_band)
+
+    elif transform_name == "sqrt_close":
+        y_hat_pos = np.clip(y_hat_all, a_min=0.0, a_max=None)
+        lower_pos = np.clip(lower_band, a_min=0.0, a_max=None)
+        upper_pos = np.clip(upper_band, a_min=0.0, a_max=None)
+        price_hat_all = y_hat_pos ** 2
+        lower_price_band = lower_pos ** 2
+        upper_price_band = upper_pos ** 2
+
+    elif transform_name == "zscore_log_close":
+        logp_all = np.log(prices_all)
+        mu = float(np.mean(logp_all))
+        sigma = float(np.std(logp_all))
+        if sigma == 0.0:
+            sigma = 1.0
+        log_price_hat = y_hat_all * sigma + mu
+        log_lower = lower_band * sigma + mu
+        log_upper = upper_band * sigma + mu
+        price_hat_all = np.exp(log_price_hat)
+        lower_price_band = np.exp(log_lower)
+        upper_price_band = np.exp(log_upper)
+
+    elif transform_name == "diff_close":
+        price_hat_all = np.empty_like(y_hat_all)
+        lower_price_band = np.empty_like(lower_band)
+        upper_price_band = np.empty_like(upper_band)
+
+        price_hat_all[0] = prices[0]
+        lower_price_band[0] = prices[0]
+        upper_price_band[0] = prices[0]
+
+        for t in range(1, n):
+            price_hat_all[t] = price_hat_all[t - 1] + y_hat_all[t]
+            lower_price_band[t] = lower_price_band[t - 1] + lower_band[t]
+            upper_price_band[t] = upper_price_band[t - 1] + upper_band[t]
+
+    elif transform_name == "simple_return":
+        price_hat_all = np.empty_like(y_hat_all)
+        lower_price_band = np.empty_like(lower_band)
+        upper_price_band = np.empty_like(upper_band)
+
+        price_hat_all[0] = prices[0]
+        lower_price_band[0] = prices[0]
+        upper_price_band[0] = prices[0]
+
+        for t in range(1, n):
+            price_hat_all[t] = price_hat_all[t - 1] * (1.0 + y_hat_all[t])
+            lower_price_band[t] = lower_price_band[t - 1] * (1.0 + lower_band[t])
+            upper_price_band[t] = upper_price_band[t - 1] * (1.0 + upper_band[t])
+
+    elif transform_name == "log_return":
+        price_hat_all = np.empty_like(y_hat_all)
+        lower_price_band = np.empty_like(lower_band)
+        upper_price_band = np.empty_like(upper_band)
+
+        log_price_hat = np.empty_like(y_hat_all)
+        log_lower = np.empty_like(lower_band)
+        log_upper = np.empty_like(upper_band)
+
+        log_price_hat[0] = np.log(prices[0])
+        log_lower[0] = np.log(prices[0])
+        log_upper[0] = np.log(prices[0])
+
+        price_hat_all[0] = prices[0]
+        lower_price_band[0] = prices[0]
+        upper_price_band[0] = prices[0]
+
+        for t in range(1, n):
+            log_price_hat[t] = log_price_hat[t - 1] + y_hat_all[t]
+            log_lower[t] = log_lower[t - 1] + lower_band[t]
+            log_upper[t] = log_upper[t - 1] + upper_band[t]
+
+            price_hat_all[t] = np.exp(log_price_hat[t])
+            lower_price_band[t] = np.exp(log_lower[t])
+            upper_price_band[t] = np.exp(log_upper[t])
+
+    else:
+        raise ValueError(
+            f"No price-space inverse mapping implemented for transform "
+            f"'{transform_name}'."
+        )
+
+    # ---------- 4) Build 1x2 figure ----------
+    fig, (ax_tr, ax_pr) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # ===== LEFT: TRANSFORM space =====
+    ax_tr.plot(
+        dates[idx_train],
+        y_all[idx_train],
+        color="tab:blue",
+        label=f"Train ({transform_name})",
+    )
+    ax_tr.plot(
+        dates[idx_val],
+        y_all[idx_val],
+        color="tab:orange",
+        label=f"Val ({transform_name})",
+    )
+    ax_tr.plot(
+        dates[idx_test],
+        y_all[idx_test],
+        color="tab:green",
+        label=f"Test ({transform_name})",
+    )
+
+    ax_tr.plot(
+        dates,
+        y_hat_all,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="Elastic Net trend",
+    )
+
+    ax_tr.fill_between(
+        dates,
+        lower_band,
+        upper_band,
+        color="gray",
+        alpha=0.25,
+        label=f"{int(ci_level * 100)}% empirical CI (transform, res={residual_source})",
+    )
+
+    ax_tr.axvline(dates[n_train], color="gray", linestyle=":", linewidth=1.0)
+    ax_tr.axvline(dates[n_train + n_val], color="gray", linestyle=":", linewidth=1.0)
+
+    ax_tr.set_xlabel("Date")
+    ax_tr.set_ylabel(f"Transformed value ({transform_name})")
+    ax_tr.set_title(f"Transform space: '{transform_name}' + empirical CI")
+    ax_tr.legend()
+
+    # ===== RIGHT: PRICE space =====
+    ax_pr.plot(
+        dates[idx_train],
+        prices[idx_train],
+        color="tab:blue",
+        label="Train (Close)",
+    )
+    ax_pr.plot(
+        dates[idx_val],
+        prices[idx_val],
+        color="tab:orange",
+        label="Val (Close)",
+    )
+    ax_pr.plot(
+        dates[idx_test],
+        prices[idx_test],
+        color="tab:green",
+        label="Test (Close)",
+    )
+
+    ax_pr.plot(
+        dates,
+        price_hat_all,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="Trend (detransformed)",
+    )
+
+    ax_pr.fill_between(
+        dates,
+        lower_price_band,
+        upper_price_band,
+        color="gray",
+        alpha=0.25,
+        label=f"{int(ci_level * 100)}% empirical CI (price)",
+    )
+
+    ax_pr.axvline(dates[n_train], color="gray", linestyle=":", linewidth=1.0)
+    ax_pr.axvline(dates[n_train + n_val], color="gray", linestyle=":", linewidth=1.0)
+
+    ax_pr.set_xlabel("Date")
+    ax_pr.set_ylabel("Close price")
+    ax_pr.set_title("Price space: Close + detransformed trend + CI")
+    ax_pr.legend()
+
+    fig.suptitle(
+        f"NVDA – empirical CI built from residuals in TRANSFORM space\n"
+        f"Transform='{transform_name}', residual_source='{residual_source}', "
+        f"CI={int(ci_level * 100)}%",
+        y=1.02,
+        fontsize=11,
+    )
+    fig.tight_layout()
+    plt.show()
+
+
+
 # ============================================================
 # 6. Single-transform and multi-transform experiments
 # ============================================================
@@ -2287,5 +2596,218 @@ def subplot_all_transforms_and_destransforms(
         fontsize=12,
     )
 
+    fig.tight_layout()
+    plt.show()
+
+
+
+def inverse_transform_series_to_price(
+    df: pd.DataFrame,
+    dates: pd.DatetimeIndex,
+    series: np.ndarray,
+    transform_name: str,
+) -> np.ndarray:
+    """
+    Given a transformed series (series) and a transform_name,
+    reconstruct the implied price series (Close units), using df['close']
+    to obtain anchors and, when needed, global mean/std in log space.
+
+    Returns
+    -------
+    price_series : np.ndarray, shape (n,)
+        Reconstructed price path aligned with 'dates'.
+
+    Notes
+    -----
+    For transforms like diff/returns this is the discrete inverse:
+        - diff_close     : cumulative sum of differences + anchor
+        - simple_return  : cumulative product of (1 + r_t)
+        - log_return     : cumulative sum in log space, then exp.
+    """
+    transform_name = transform_name.lower()
+    y = np.asarray(series, dtype=float).ravel()
+    n = len(y)
+    if n == 0:
+        return y.copy()
+
+    prices_all = df["close"].to_numpy(dtype=float).ravel()
+    prices = df.loc[dates, "close"].to_numpy(dtype=float).ravel()
+    if len(prices) != n:
+        raise RuntimeError(
+            "inverse_transform_series_to_price: mismatch between series length "
+            "and aligned prices length."
+        )
+
+    if transform_name == "close":
+        # Identity
+        return y
+
+    elif transform_name == "log_close":
+        # P_t = exp(log P_t)
+        return np.exp(y)
+
+    elif transform_name == "sqrt_close":
+        # P_t = (sqrt(P_t))^2, enforcing non-negativity
+        y_pos = np.clip(y, a_min=0.0, a_max=None)
+        return y_pos ** 2
+
+    elif transform_name == "zscore_log_close":
+        # y_t = (log P_t - mu)/sigma
+        logp_all = np.log(prices_all)
+        mu = float(np.mean(logp_all))
+        sigma = float(np.std(logp_all))
+        if sigma == 0.0:
+            sigma = 1.0
+        log_price_series = y * sigma + mu
+        return np.exp(log_price_series)
+
+    elif transform_name == "diff_close":
+        # y_t = P_t - P_{t-1}, reconstruct via cumulative sum with anchor
+        price_series = np.empty_like(y)
+        price_series[0] = prices[0]
+        for t in range(1, n):
+            price_series[t] = price_series[t - 1] + y[t]
+        return price_series
+
+    elif transform_name == "simple_return":
+        # y_t = (P_t - P_{t-1}) / P_{t-1}
+        price_series = np.empty_like(y)
+        price_series[0] = prices[0]
+        for t in range(1, n):
+            price_series[t] = price_series[t - 1] * (1.0 + y[t])
+        return price_series
+
+    elif transform_name == "log_return":
+        # y_t = log P_t - log P_{t-1}
+        price_series = np.empty_like(y)
+        log_price_series = np.empty_like(y)
+
+        log_price_series[0] = np.log(prices[0])
+        price_series[0] = prices[0]
+
+        for t in range(1, n):
+            log_price_series[t] = log_price_series[t - 1] + y[t]
+            price_series[t] = np.exp(log_price_series[t])
+
+        return price_series
+
+    else:
+        raise ValueError(
+            f"inverse_transform_series_to_price: no inverse implemented for transform "
+            f"'{transform_name}'."
+        )
+
+
+
+def plot_jumpy_detransformed_price_trend(
+    df: pd.DataFrame,
+    model: Pipeline,
+    transform_name: str,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+    use_step: bool = True,
+) -> None:
+    """
+    Plot a 'jumpy' de-transformation in price space:
+
+    - Reconstruct price from the TRUE transformed series y_t by applying
+      the inverse transform (this recovers the jagged original path).
+    - Reconstruct the smooth trend from the FITTED y_hat_t.
+    - Compare both on the same axis.
+
+    This is especially informative for:
+        - 'diff_close'
+        - 'simple_return'
+        - 'log_return'
+
+    where:
+        actual increments/returns -> jagged path,
+        model-smoothed increments -> smooth trend.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must contain 'close' and DatetimeIndex.
+    model : Pipeline
+        Fitted ElasticNet model in transform space.
+    transform_name : str
+        One of TRANSFORM_FUNCS keys.
+    train_frac, val_frac : float
+        Fractions for train / validation (test is the rest).
+    use_step : bool
+        If True, plot jumpy series with plt.step(..., where='post').
+    """
+    # 1) Build transformed data and fitted values
+    X_all, y_all, dates = make_transformed_time_regression_data(
+        df, transform_name=transform_name, price_col="close"
+    )
+    y_hat_all = model.predict(X_all)
+    n = len(y_all)
+    if n == 0:
+        raise ValueError(
+            f"No finite points for transform '{transform_name}' "
+            f"when plotting jumpy de-transformation."
+        )
+
+    # 2) Inverse-transform TRUE y_t and fitted y_hat_t
+    price_jumpy = inverse_transform_series_to_price(
+        df=df,
+        dates=dates,
+        series=y_all,
+        transform_name=transform_name,
+    )
+    price_hat = inverse_transform_series_to_price(
+        df=df,
+        dates=dates,
+        series=y_hat_all,
+        transform_name=transform_name,
+    )
+
+    # 3) Segment indices (for split markers)
+    idx_train, idx_val, idx_test, n_train, n_val, n_test = _segment_indices(
+        n, train_frac=train_frac, val_frac=val_frac
+    )
+
+    # 4) Plot: jumpy vs smooth trend
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    if use_step:
+        ax.step(
+            dates,
+            price_jumpy,
+            where="post",
+            color="tab:blue",
+            alpha=0.8,
+            label="Jumpy de-transform from TRUE y_t",
+        )
+    else:
+        ax.plot(
+            dates,
+            price_jumpy,
+            color="tab:blue",
+            alpha=0.8,
+            label="Jumpy de-transform from TRUE y_t",
+        )
+
+    ax.plot(
+        dates,
+        price_hat,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="Smooth trend from model (y_hat_t)",
+    )
+
+    # Vertical lines for train / val / test boundaries
+    ax.axvline(dates[n_train], color="gray", linestyle=":", linewidth=1.0)
+    ax.axvline(dates[n_train + n_val], color="gray", linestyle=":", linewidth=1.0)
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Close price")
+    ax.set_title(
+        "Jumpy vs smooth de-transformation in price space\n"
+        f"(transform = '{transform_name}', train/val/test split marked)"
+    )
+    ax.legend()
     fig.tight_layout()
     plt.show()

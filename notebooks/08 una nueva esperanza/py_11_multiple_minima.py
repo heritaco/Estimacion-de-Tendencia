@@ -789,78 +789,65 @@ def extend_trend_minimum_roughness(
     d: int,
     N_total: int,
     N_train: int,
+    ridge: float = 1e-3,
 ) -> np.ndarray:
     """
     Extiende la tendencia ajustada en TRAIN a todo el horizonte [0..N_total-1]
-    SIN imponer Δ^d t_t = m_hat constante.
+    SIN imponer Δ^d t_t = const y SIN usar Z_val / Z_test.
 
-    Idea:
-      - Fijamos los primeros N_train puntos en t_hat_train.
-      - Elegimos los N_future = N_total - N_train puntos futuros para
-        minimizar la rugosidad global:
-            min_u || K_full t_full ||^2,
-        donde:
-          * K_full = matriz de diferencias de orden d sobre [0..N_total-1]
-          * t_full = [t_hat_train; u]
+    Problema que resolvemos para los futuros u:
 
-        Esto sólo penaliza Δ^d t_t, no usa m_hat ni observa Z en val/test.
-        Es la “extensión más suave” compatible con la cola del train.
+        min_u  ||K_k k + K_u u||^2  + ridge * ||u||^2
 
-    Notas:
-      - No entra λ: si sólo hay término de penalización, el factor de escala
-        se cancela en el argmin.
-      - No hay data leakage: para t >= N_train no se usa Z_t.
+      donde:
+        - k = t_hat_train (tendencia Guerrero en TRAIN),
+        - K_full = difference_matrix(N_total, d),
+        - K_k = columnas de K_full asociadas a TRAIN,
+        - K_u = columnas asociadas a FUTURO.
 
-    Parámetros
-    ----------
-    t_hat_train : tendencia en TRAIN (longitud N_train)
-    d           : orden de diferencia (1, 2, 3, 4, ...)
-    N_total     : longitud total (TRAIN + VAL + TEST)
-    N_train     : longitud del tramo de entrenamiento
-
-    Devuelve
-    --------
-    t_full : np.ndarray
-        Tendencia extendida de longitud N_total.
+    El término ridge > 0 evita que la solución en el tramo futuro sea
+    polinómica exacta de grado d: ya no se cumple Δ^{d+1} t_t ≡ 0.
     """
+
     t_hat_train = np.asarray(t_hat_train, dtype=float).ravel()
     N_train = int(N_train)
     N_total = int(N_total)
 
     if N_total <= N_train:
-        # No hay nada que extender
         return t_hat_train.copy()
 
     N_future = N_total - N_train
     d_eff = int(d)
 
-    # Caso trivial d=0: mantenemos constante la tendencia
+    # Caso trivial d=0: mantenemos constante
     if d_eff <= 0:
         t_full = np.empty(N_total, dtype=float)
         t_full[:N_train] = t_hat_train
         t_full[N_train:] = t_hat_train[-1]
         return t_full
 
-    # Matriz de diferencias sobre TODO el horizonte (0..N_total-1)
-    K_full = difference_matrix(N_total, d_eff)  # shape: (N_total - d_eff, N_total)
+    # Matriz de diferencias de orden d en todo el horizonte
+    K_full = difference_matrix(N_total, d_eff)  # (N_total - d_eff, N_total)
 
-    # Particionamos columnas: conocidas (TRAIN) y desconocidas (FUTURO)
-    K_k = K_full[:, :N_train]       # columnas 0 .. N_train-1
-    K_u = K_full[:, N_train:]       # columnas N_train .. N_total-1
+    # Partición TRAIN / FUTURO
+    K_k = K_full[:, :N_train]      # conocidas
+    K_u = K_full[:, N_train:]      # desconocidas
 
-    # Queremos u minimizando || K_k k + K_u u ||^2
-    # Normal equations: (K_u' K_u) u = - K_u' K_k k
     k_vec = t_hat_train
-    A = K_u.T @ K_u          # (N_future x N_future)
+
+    # Matriz y vector del sistema (K_u' K_u + ridge I) u = -K_u' K_k k
+    A = K_u.T @ K_u + ridge * np.eye(N_future)
     b = -K_u.T @ (K_k @ k_vec)
 
-    # Resolver sistema; usamos lstsq por robustez numérica
-    u, *_ = np.linalg.lstsq(A, b, rcond=None)
+    # Resolver sistema lineal (determinista, sin usar Z_val / Z_test)
+    u = np.linalg.solve(A, b)
 
+    # Reconstruir tendencia completa
     t_full = np.empty(N_total, dtype=float)
     t_full[:N_train] = k_vec
     t_full[N_train:] = u
     return t_full
+
 
 
 
@@ -1212,6 +1199,7 @@ def analyze_all_objectives_for_d(
             d=d,
             N_total=N_full,
             N_train=N_train,
+            ridge=1e-3,
         )
         trend_train = trend_full[:N_train]
         trend_val   = trend_full[N_train:N_train + N_val]
